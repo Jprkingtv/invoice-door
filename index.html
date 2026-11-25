@@ -168,6 +168,22 @@ select.picker{margin-top:6px}
 .sheet h3{margin:0 0 13px;color:var(--gold2);letter-spacing:1.8px;font-size:15.5px;text-align:center}
 .sheet .srow{display:flex;flex-direction:column;gap:9px}
 .sheet .btn{width:100%}
+/* ---------- sign-in wall + sync indicator ---------- */
+.sbwall{position:fixed;inset:0;z-index:95;display:none;align-items:flex-start;justify-content:center;overflow-y:auto;padding:26px 14px 44px;background:radial-gradient(700px 340px at 50% -6%,rgba(240,205,85,.20),rgba(240,205,85,0) 70%),linear-gradient(170deg,rgba(16,30,70,.97),rgba(5,9,22,.99))}
+.sbwall.open{display:flex}
+.sbwall .panel{width:100%;max-width:520px;text-align:center;padding:30px 20px 24px;border-radius:22px;border:1px solid rgba(212,175,55,.62);background:radial-gradient(430px 210px at 50% -4%,rgba(240,205,85,.20),rgba(240,205,85,0) 70%),linear-gradient(170deg,rgba(48,76,152,.50),rgba(10,20,48,.96) 58%);box-shadow:0 20px 46px rgba(0,0,0,.55),0 0 40px rgba(212,175,55,.16),inset 0 1px 0 rgba(240,205,85,.4);animation:riseIn .45s ease both}
+.sbwall .hero-medal{width:104px;height:104px}
+.sbwall .wname{font-family:var(--serif);font-size:31px;letter-spacing:3.5px;line-height:1.1;margin:15px 0 4px;background:linear-gradient(180deg,#f9e38f 0%,var(--gold2) 45%,var(--gold3) 100%);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:var(--gold2);filter:drop-shadow(0 3px 12px rgba(212,175,55,.35))}
+.sbwall .wtag{margin:0;font-size:11px;font-weight:600;letter-spacing:3px;color:var(--cream)}
+.sbwall .wsub{font-size:14.5px;line-height:1.6;color:var(--cream);opacity:.9;margin:15px 0 2px}
+.sbwall label{text-align:left}
+.sbwall .btn{width:100%;margin-top:12px}
+.sbwall .wmsg{font-size:13.5px;color:var(--gold2);min-height:20px;margin:13px 0 0;line-height:1.55}
+.sbwall .wnote{font-size:12.5px;color:var(--mut);margin:17px 0 0;line-height:1.6}
+.sbdot{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:1px}
+.sbdot.g{background:var(--green2);box-shadow:0 0 9px rgba(95,211,95,.85)}
+.sbdot.gold{background:var(--gold);box-shadow:0 0 9px rgba(212,175,55,.75)}
+.sbsync{display:flex;align-items:center;gap:7px;justify-content:flex-end;font-size:12px;color:var(--mut);margin:9px 2px 0;letter-spacing:.3px}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
@@ -192,6 +208,7 @@ select.picker{margin-top:6px}
       <p class="sub">837 NW 8th Ave &bull; (941) 270-4988 &mdash; ask for JAY</p>
     </div>
   </div>
+  <div class="sbsync no-print" id="sbsync"><span class="sbdot gold"></span><span id="sbsyncTxt">On this device — will sync when you're back</span></div>
   <div class="navrow no-print" id="navrow"></div>
   <div id="app"></div>
   <p class="motto">GOD IS GOOD ALL THE TIME</p>
@@ -222,6 +239,20 @@ select.picker{margin-top:6px}
     <button class="btn ghost" onclick="closeSheets();go('settings')">Settings</button>
     <button class="btn ghost" onclick="closeSheets()">Cancel</button>
   </div></div>
+</div>
+<div class="sbwall no-print" id="sbwall">
+  <div class="panel">
+    <div class="hero-medal"><img src="https://invoice.jprkingtv.store/logo.jpg" alt="JPR KING — Sales, Auto Repair, Autobody"></div>
+    <h2 class="wname">JPR KING</h2>
+    <p class="wtag">SALES &bull; AUTO REPAIR &bull; AUTOBODY</p>
+    <p class="wsub">Sign in once and your book backs up to <strong>your own database</strong> — safe if this phone is ever lost, and waiting for you on any device you sign in on.</p>
+    <label for="sbEmail">Your email</label>
+    <input id="sbEmail" type="email" autocomplete="email" placeholder="you@example.com">
+    <button class="btn" onclick="sbSendLink()">Email me my sign-in link</button>
+    <p class="wmsg" id="sbWallMsg"></p>
+    <button class="btn ghost" onclick="sbWorkOffline()">Keep working on this device only</button>
+    <p class="wnote"><span class="sbdot gold"></span> On this device — will sync when you're back.<br>No password to remember — the link in your email is the key.</p>
+  </div>
 </div>
 <script>
 "use strict";
@@ -260,7 +291,312 @@ function loadBook(){
   return normalizeBook({});
 }
 var book = loadBook();
-function saveBook(){ localStorage.setItem(LS_KEY, JSON.stringify(book)); }
+function saveBook(){
+  localStorage.setItem(LS_KEY, JSON.stringify(book));
+  if (!sbApplyingRemote){
+    try { var sbm = sbLoadMeta(); sbm.localSavedAt = Date.now(); sbSaveMeta(sbm); } catch (e) {}
+    sbScheduleSync();
+  }
+}
+/* ---------- Supabase sync (the owner's own database) ----------
+   The book still lives in localStorage exactly as before. When the owner
+   signs in (magic link), the same book object is mirrored to his Supabase
+   books table — one row per owner, owner-only RLS. Every network call is
+   best-effort: the shop never waits on it, and a signed-out or offline
+   device simply keeps working on its local book. */
+var SB_URL = "https://lwnpgzduhghzdvcexjwe.supabase.co";
+var SB_KEY = "sb_publishable_BQKwA9LQDWaHHiVt_5eA9A_8Z4is7fv";
+var SB_AUTH_KEY = "jpr-invoicing-auth";
+var SB_META_KEY = "jpr-invoicing-meta";
+var sbSession = null;        /* {access_token, refresh_token, expires_at, user_id, email} */
+var sbOfflineOnly = false;   /* owner tapped "Keep working on this device only" */
+var sbSyncState = "off";     /* off | pending | ok | error */
+var sbSyncTimer = null;
+var sbPushing = false;
+var sbPushAgain = false;
+var sbApplyingRemote = false;
+
+function sbFetch(){ return (typeof fetch === "function") ? fetch : null; }
+function sbLoadSession(){
+  try { var raw = localStorage.getItem(SB_AUTH_KEY); if (raw) { var s = JSON.parse(raw); if (s && s.access_token) return s; } } catch (e) {}
+  return null;
+}
+function sbSaveSession(){ try { if (sbSession) localStorage.setItem(SB_AUTH_KEY, JSON.stringify(sbSession)); } catch (e) {} }
+function sbClearSession(){ try { localStorage.removeItem(SB_AUTH_KEY); } catch (e) {} }
+function sbLoadMeta(){
+  try { var raw = localStorage.getItem(SB_META_KEY); if (raw) { var m = JSON.parse(raw); if (m && typeof m === "object") return m; } } catch (e) {}
+  return { localSavedAt: 0, remoteUpdatedAt: null };
+}
+function sbSaveMeta(m){ try { localStorage.setItem(SB_META_KEY, JSON.stringify(m)); } catch (e) {} }
+function sbHeaders(withJson){
+  var h = { "apikey": SB_KEY };
+  if (withJson) h["Content-Type"] = "application/json";
+  if (sbSession && sbSession.access_token) h["Authorization"] = "Bearer " + sbSession.access_token;
+  return h;
+}
+function sbB64Decode(seg){
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var s = String(seg || "").replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  var out = "";
+  for (var i = 0; i < s.length; i += 4){
+    var n = 0, pad = 0, j, c, v;
+    for (j = 0; j < 4; j++){
+      c = s.charAt(i + j);
+      if (c === "=") { pad++; n <<= 6; }
+      else { v = chars.indexOf(c); n = (n << 6) | (v < 0 ? 0 : v); }
+    }
+    out += String.fromCharCode((n >> 16) & 255);
+    if (pad < 2) out += String.fromCharCode((n >> 8) & 255);
+    if (pad < 1) out += String.fromCharCode(n & 255);
+  }
+  return out;
+}
+function sbJwtPayload(tok){
+  try {
+    var parts = String(tok || "").split(".");
+    if (parts.length < 2) return null;
+    var bin = sbB64Decode(parts[1]);
+    var json = bin;
+    try { json = decodeURIComponent(bin.split("").map(function (c){ return "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2); }).join("")); } catch (e) {}
+    return JSON.parse(json);
+  } catch (e) { return null; }
+}
+function sbStoreTokens(j){
+  if (!j || !j.access_token) return false;
+  var p = sbJwtPayload(j.access_token) || {};
+  var expMs = 0;
+  if (j.expires_at) expMs = Number(j.expires_at) * 1000;
+  else if (p.exp) expMs = Number(p.exp) * 1000;
+  else if (j.expires_in) expMs = Date.now() + Number(j.expires_in) * 1000;
+  sbSession = {
+    access_token: j.access_token,
+    refresh_token: j.refresh_token || (sbSession && sbSession.refresh_token) || "",
+    expires_at: expMs,
+    user_id: (j.user && j.user.id) || p.sub || (sbSession && sbSession.user_id) || "",
+    email: (j.user && j.user.email) || p.email || (sbSession && sbSession.email) || ""
+  };
+  sbSaveSession();
+  return true;
+}
+function sbCaptureHash(){
+  var hash = "";
+  try { hash = String(window.location.hash || ""); } catch (e) {}
+  if (!hash || hash.indexOf("access_token=") < 0) return false;
+  var params = {};
+  hash.replace(/^#/, "").split("&").forEach(function (pair){
+    var i = pair.indexOf("=");
+    if (i > 0) { try { params[decodeURIComponent(pair.slice(0, i))] = decodeURIComponent(pair.slice(i + 1)); } catch (e) {} }
+  });
+  if (!params.access_token) return false;
+  sbStoreTokens({
+    access_token: params.access_token,
+    refresh_token: params.refresh_token || "",
+    expires_in: params.expires_in ? Number(params.expires_in) : 0
+  });
+  try { window.history.replaceState(null, "", window.location.pathname + window.location.search); } catch (e) {}
+  return true;
+}
+function sbRefresh(){
+  var f = sbFetch();
+  if (!f || !sbSession || !sbSession.refresh_token) return Promise.resolve("offline");
+  return f(SB_URL + "/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: sbSession.refresh_token })
+  }).then(function (r){
+    if (!r.ok) return "invalid";
+    return r.json().then(function (j){ return sbStoreTokens(j) ? "ok" : "invalid"; }, function (){ return "invalid"; });
+  }).catch(function (){ return "offline"; });
+}
+function sbValidate(){
+  var f = sbFetch();
+  if (!sbSession) return Promise.resolve("none");
+  if (!f) return Promise.resolve("offline");
+  function tryUser(){
+    return f(SB_URL + "/auth/v1/user", { headers: sbHeaders(false) }).then(function (r){
+      if (r.ok) return r.json().then(function (u){
+        if (u && u.id) { sbSession.user_id = u.id; if (u.email) sbSession.email = u.email; sbSaveSession(); }
+        return "ok";
+      }, function (){ return "ok"; });
+      if (r.status === 401 || r.status === 403) return "invalid";
+      return "offline";
+    }).catch(function (){ return "offline"; });
+  }
+  var stale = sbSession.expires_at && (sbSession.expires_at - Date.now() < 60000);
+  if (stale) return sbRefresh().then(function (res){ return res === "ok" ? tryUser() : res; });
+  return tryUser().then(function (res){
+    if (res !== "invalid") return res;
+    return sbRefresh().then(function (r2){ return r2 === "ok" ? "ok" : r2; });
+  });
+}
+/* ---------- sign-in wall ---------- */
+function sbPaintWall(){
+  var w = null;
+  try { w = $("sbwall"); } catch (e) {}
+  if (!w || !w.classList) return;
+  if (!sbSession && !sbOfflineOnly) w.classList.add("open"); else w.classList.remove("open");
+}
+function sbShowWall(){ sbOfflineOnly = false; sbPaintWall(); }
+function sbWorkOffline(){
+  sbOfflineOnly = true;
+  sbPaintWall();
+  flash("On this device only — your book is safe here, and syncs when you sign in.");
+}
+function sbSendLink(){
+  var inp = null, msg = null;
+  try { inp = $("sbEmail"); msg = $("sbWallMsg"); } catch (e) {}
+  var email = inp ? String(inp.value || "").trim() : "";
+  function say(t){ if (msg) msg.textContent = t; }
+  if (!email || email.indexOf("@") < 1) { say("Enter your email address first."); return; }
+  var f = sbFetch();
+  if (!f) { say("No connection right now — try again in a moment, or keep working on this device."); return; }
+  say("Sending your sign-in link\u2026");
+  var redirect = "";
+  try { redirect = window.location.origin + window.location.pathname; } catch (e) {}
+  f(SB_URL + "/auth/v1/otp", {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email: email, options: { emailRedirectTo: redirect } })
+  }).then(function (r){
+    if (!r.ok) throw new Error("otp " + r.status);
+    say("Check your email — your sign-in link is on its way to " + email + ". Open it on this device and you're in.");
+  }).catch(function (){
+    say("That didn't send — check the address and your connection, then try again.");
+  });
+}
+function sbSignOut(){
+  var f = sbFetch();
+  if (f && sbSession) { try { f(SB_URL + "/auth/v1/logout", { method: "POST", headers: sbHeaders(false) }).catch(function (){}); } catch (e) {} }
+  sbSession = null;
+  sbClearSession();
+  if (sbSyncTimer) { clearTimeout(sbSyncTimer); sbSyncTimer = null; }
+  sbSetSync("off");
+  flash("Signed out — your book stays on this device.");
+  sbPaintWall();
+}
+/* ---------- sync engine ---------- */
+function sbSyncText(){
+  if (sbSession && sbSyncState === "ok") return "Saved to your database";
+  if (sbSession && sbSyncState === "pending") return "Saving to your database\u2026";
+  return "On this device — will sync when you're back";
+}
+function sbSyncDotClass(){ return (sbSession && sbSyncState === "ok") ? "sbdot g" : "sbdot gold"; }
+function sbSetSync(state){
+  sbSyncState = state;
+  try {
+    var txt = $("sbsyncTxt");
+    if (txt) txt.textContent = sbSyncText();
+    var pill = $("sbsync");
+    if (pill && pill.querySelector) { var d = pill.querySelector(".sbdot"); if (d) d.className = sbSyncDotClass(); }
+  } catch (e) {}
+  try { if (typeof ui !== "undefined" && ui.view === "settings") render(); } catch (e) {}
+}
+function sbScheduleSync(){
+  if (!sbSession || sbApplyingRemote) return;
+  sbSetSync("pending");
+  if (sbSyncTimer) clearTimeout(sbSyncTimer);
+  sbSyncTimer = setTimeout(function (){ sbSyncTimer = null; sbPushNow(); }, 1500);
+}
+function sbSyncNow(){
+  if (sbSyncTimer) { clearTimeout(sbSyncTimer); sbSyncTimer = null; }
+  if (sbSession) sbPushNow();
+}
+function sbPushNow(){
+  var f = sbFetch();
+  if (!f || !sbSession || !sbSession.user_id) return;
+  if (sbPushing) { sbPushAgain = true; return; }
+  sbPushing = true;
+  sbSetSync("pending");
+  var stamp = new Date().toISOString();
+  var h = sbHeaders(true);
+  h["Prefer"] = "resolution=merge-duplicates";
+  f(SB_URL + "/rest/v1/books", {
+    method: "POST",
+    headers: h,
+    body: JSON.stringify({ owner_id: sbSession.user_id, data: book, updated_at: stamp })
+  }).then(function (r){
+    sbPushing = false;
+    if (!r.ok) throw new Error("upsert " + r.status);
+    var m = sbLoadMeta(); m.remoteUpdatedAt = stamp; sbSaveMeta(m);
+    sbSetSync("ok");
+    if (sbPushAgain) { sbPushAgain = false; sbPushNow(); }
+  }).catch(function (){
+    sbPushing = false;
+    sbPushAgain = false;
+    sbSetSync("error");
+  });
+}
+function sbInitialSync(){
+  var f = sbFetch();
+  if (!f || !sbSession || !sbSession.user_id) return;
+  sbSetSync("pending");
+  f(SB_URL + "/rest/v1/books?owner_id=eq." + encodeURIComponent(sbSession.user_id) + "&select=data,updated_at", {
+    headers: sbHeaders(false)
+  }).then(function (r){
+    if (!r.ok) throw new Error("books get " + r.status);
+    return r.json();
+  }).then(function (rows){
+    var meta = sbLoadMeta();
+    if (rows && rows.length && rows[0] && rows[0].data){
+      var row = rows[0];
+      var remoteMs = Date.parse(row.updated_at) || 0;
+      if (remoteMs > (meta.localSavedAt || 0)){
+        sbApplyingRemote = true;
+        book = normalizeBook(row.data);
+        saveBook();
+        sbApplyingRemote = false;
+        var m2 = sbLoadMeta(); m2.localSavedAt = remoteMs; m2.remoteUpdatedAt = row.updated_at; sbSaveMeta(m2);
+        sbSetSync("ok");
+        flash("Book loaded from your database.");
+        return;
+      }
+      meta.remoteUpdatedAt = row.updated_at; sbSaveMeta(meta);
+    }
+    sbPushNow();
+  }).catch(function (){ sbSetSync("error"); });
+}
+function sbBoot(){
+  try {
+    sbCaptureHash();
+    if (!sbSession) sbSession = sbLoadSession();
+    sbPaintWall();
+    if (!sbSession) { sbSetSync("off"); return; }
+    sbSetSync("pending");
+    sbValidate().then(function (res){
+      if (res === "invalid"){
+        sbSession = null;
+        sbClearSession();
+        sbSetSync("off");
+        sbPaintWall();
+        return;
+      }
+      sbPaintWall();
+      sbInitialSync();
+    });
+  } catch (e) { /* sync must never break the shop app */ }
+}
+/* ---------- settings card ---------- */
+function sbAccountCard(){
+  var dot = '<span class="' + sbSyncDotClass() + '"></span>';
+  if (sbSession){
+    return '<div class="card"><h2>Account &amp; sync</h2>' +
+      '<p class="small">' + dot + " " + esc(sbSyncText()) + "</p>" +
+      '<p class="small mut">Signed in as <strong style="color:var(--cream)">' + esc(sbSession.email || "") + '</strong> — your book backs up to your own database every time it changes, and it opens on any device you sign in on.</p>' +
+      '<div class="btnrow"><button class="btn ghost" onclick="sbSignOut()">Sign out</button></div>' +
+    "</div>";
+  }
+  return '<div class="card"><h2>Account &amp; sync</h2>' +
+    '<p class="small">' + dot + " " + esc(sbSyncText()) + "</p>" +
+    '<p class="small mut">Not signed in — your book lives on this device only. Sign in once with your email and your book backs up to your own database, and follows you to any device.</p>' +
+    '<div class="btnrow"><button class="btn" onclick="sbShowWall()">Sign in to sync</button></div>' +
+  "</div>";
+}
+function sbBookNote(){
+  if (sbSession) return '<p class="small">Your book is <strong>backed up to your database</strong> every time it changes, and a copy lives on this device too. Keep exporting now and then for an extra walk-away copy: importing an export on any signed-in device brings the whole book back.</p>';
+  return '<p class="small">Your book lives <strong>on this device only</strong> — nothing is stored online. Export it regularly and keep the file safe: that export is your walk-away copy, and importing it on any device brings your whole book back.</p>';
+}
+
 
 /* ---------- helpers ---------- */
 function $(id){ return document.getElementById(id); }
@@ -1578,6 +1914,7 @@ function renderSettings(){
   var s = book.settings;
   $("app").innerHTML =
     msgHtml() +
+    sbAccountCard() +
     '<div class="card"><h2>Business settings</h2>' +
       "<label>Business name</label><input id='stName' value='" + esc(s.businessName) + "'>" +
       "<label>Business address</label><textarea id='stAddress' rows='2'>" + esc(s.businessAddress) + "</textarea>" +
@@ -1589,7 +1926,7 @@ function renderSettings(){
       '<p class="small mut">Customer calls &amp; texts from this app open in Google Voice — your shop line, never your personal cell.</p>' +
     "</div>" +
     '<div class="card"><h2>Your book</h2>' +
-      '<p class="small">Your book lives <strong>on this device only</strong> — nothing is stored online. Export it regularly and keep the file safe: that export is your walk-away copy, and importing it on any device brings your whole book back.</p>' +
+      sbBookNote() +
       '<p class="small mut">On this device right now: ' + book.clients.length + " clients &bull; " + book.documents.length + " documents &bull; " + book.items.length + " library items &bull; " + (book.bookings || []).length + " bookings &bull; " + (book.filedBookings || []).length + " filed bookings.</p>" +
       "<label>Import book (book export file, or filed-history file)</label>" +
       '<input type="file" id="importFile" accept=".json,application/json">' +
@@ -1648,6 +1985,7 @@ function importBook(){
       }
       book = normalizeBook(book);
       saveBook();
+      sbSyncNow();
       flash("Book imported: " + book.clients.length + " clients, " + book.documents.length + " documents, " + book.filedBookings.length + " filed bookings.");
       go("home");
     } catch (e) {
@@ -1659,6 +1997,7 @@ function importBook(){
 
 /* ---------- init ---------- */
 render();
+sbBoot();
 </script>
 </body>
 </html>
