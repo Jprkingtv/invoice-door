@@ -216,7 +216,9 @@ select.picker{margin-top:6px}
   <div class="scrim" onclick="closeSheets()"></div>
   <div class="panel"><h3>MORE</h3><div class="srow">
     <button class="btn ghost" onclick="closeSheets();go('library')">Library</button>
+    <button class="btn ghost" onclick="closeSheets();go('paypal')">PayPal</button>
     <button class="btn ghost" onclick="closeSheets();go('bookings')">Bookings</button>
+    <button class="btn ghost" onclick="closeSheets();go('filed')">Filed</button>
     <button class="btn ghost" onclick="closeSheets();go('settings')">Settings</button>
     <button class="btn ghost" onclick="closeSheets()">Cancel</button>
   </div></div>
@@ -234,7 +236,10 @@ var DEFAULT_SETTINGS = {
   businessEmail: "jprkingtv@gmail.com",
   businessPhone: "(941) 270-4988",
   paypalMeHandle: "JPRKINGTV365",
-  portalUrl: "https://jprkingtv.github.io/signing/"
+  portalUrl: "https://jprkingtv.github.io/signing/",
+  bookingServices: ["Estimate", "Repair drop-off", "Service"],
+  bookingDepositCents: 35000,
+  bookingNote: ""
 };
 function normalizeBook(b){
   b = (b && typeof b === "object") ? b : {};
@@ -243,7 +248,8 @@ function normalizeBook(b){
     documents: Array.isArray(b.documents) ? b.documents : [],
     items: Array.isArray(b.items) ? b.items : [],
     settings: Object.assign({}, DEFAULT_SETTINGS, (b.settings && typeof b.settings === "object") ? b.settings : {}),
-    filedBookings: Array.isArray(b.filedBookings) ? b.filedBookings : (Array.isArray(b.bookings) ? b.bookings : [])
+    filedBookings: Array.isArray(b.filedBookings) ? b.filedBookings : [],
+    bookings: Array.isArray(b.bookings) ? b.bookings : []
   };
 }
 function loadBook(){
@@ -319,9 +325,16 @@ function nextNumber(kind){
   return prefix + (m + 1);
 }
 function statusChip(doc){
-  var s = doc.status || "draft";
-  var cls = s === "paid" || s === "approved" ? "chip paid" : (s === "declined" || s === "cancelled" ? "chip bad" : "chip");
-  return '<span class="' + cls + '">' + esc(s) + "</span>";
+  if (doc && doc.kind === "invoice"){
+    var t = docTotals(doc);
+    if (doc.status === "paid" || (t.total > 0 && t.balance <= 0)) return '<span class="chip paid">Paid</span>';
+    if (t.paid > 0 && t.balance > 0) return '<span class="chip">Partial</span>';
+    return '<span class="chip">Unpaid</span>';
+  }
+  var s = (doc && doc.status) || "draft";
+  if (s === "sent") return '<span class="chip">Sent \u2014 awaiting approval</span>';
+  var cls = s === "approved" ? "chip paid" : (s === "declined" || s === "cancelled" ? "chip bad" : "chip");
+  return '<span class="' + cls + '">' + esc(s.charAt(0).toUpperCase() + s.slice(1)) + "</span>";
 }
 function paypalLink(amountCents){
   var h = String(book.settings.paypalMeHandle || "").replace(/^@/, "").trim();
@@ -379,6 +392,30 @@ function copyText(txt, btn){
   }
 }
 
+/* ---------- Google Voice (shop line) ----------
+   Owner rule: customer calls & texts go through Google Voice, never the
+   personal cell line. Call route is Google's documented Voice URL
+   (support.google.com/voice/answer/3379129); text route opens the Voice
+   conversation thread for the number (voice.google.com messages itemId). */
+function gvDigits(phone){
+  var d = String(phone || "").replace(/\D/g, "");
+  if (d.length === 10) d = "1" + d;
+  return d.length >= 11 ? d : "";
+}
+function gvCallUrl(phone){
+  var d = gvDigits(phone);
+  return d ? "https://voice.google.com/u/0/calls?a=nc,%2B" + d : "";
+}
+function gvTextUrl(phone){
+  var d = gvDigits(phone);
+  return d ? "https://voice.google.com/u/0/messages?itemId=t.%2B" + d : "";
+}
+function copyClientNum(id, btn){
+  var c = clientById(id); if (!c) return;
+  var d = gvDigits(c.phone);
+  copyText(d ? "+" + d : String(c.phone || ""), btn);
+}
+
 /* ---------- app state / router ---------- */
 var ui = {
   view: "home",            /* home | documents | docEdit | docView | clients | clientEdit | library | bookings | settings | sign */
@@ -391,12 +428,18 @@ var ui = {
   draftIsNew: false,
   editClientId: null,      /* client being edited (null = new) */
   editItemId: null,
+  docFilter: "all",
+  bookTab: "book",
+  bookingForm: false,
+  gvPaste: "",
+  custDocId: null,
+  custCode: "",
   signWhich: null,         /* 'signature' | 'asIsSignature' */
   msg: "", msgOk: true
 };
 var NAV = [
   ["home", "Home"], ["documents", "Documents"], ["clients", "Clients"],
-  ["library", "Library"], ["bookings", "Bookings"], ["settings", "Settings"]
+  ["library", "Library"], ["paypal", "PayPal"], ["bookings", "Bookings"], ["filed", "Filed"], ["settings", "Settings"]
 ];
 function go(view){
   ui.view = view; ui.msg = "";
@@ -406,6 +449,7 @@ function go(view){
 }
 function goDocs(kind){
   ui.docTab = kind;
+  ui.docFilter = "all";
   go("documents");
 }
 function renderNav(){
@@ -417,7 +461,7 @@ function renderNav(){
   var bbOn = ui.view === "home" ? "home"
     : (ui.view === "clients" || ui.view === "clientEdit") ? "clients"
     : (ui.view === "documents" || ui.view === "docEdit" || ui.view === "docView" || ui.view === "sign") ? (ui.docTab === "invoice" ? "invoices" : "estimates")
-    : "";
+    : "more";
   Array.prototype.forEach.call(document.querySelectorAll("#bottombar .bb-btn"), function (b){
     b.classList.toggle("on", b.getAttribute("data-bb") === bbOn);
   });
@@ -451,6 +495,8 @@ function render(){
   else if (v === "clientEdit") renderClientEdit();
   else if (v === "library") renderLibrary();
   else if (v === "bookings") renderBookings();
+  else if (v === "paypal") renderPaypal();
+  else if (v === "filed") renderFiled();
   else if (v === "settings") renderSettings();
   else if (v === "sign") renderSign();
 }
@@ -503,6 +549,7 @@ function renderHome(){
     return String(b.updatedAt || b.createdAt || b.issueDate || "").localeCompare(String(a.updatedAt || a.createdAt || a.issueDate || ""));
   }).slice(0, 5);
   var portalShort = String(s.portalUrl || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+  var liveN = book.documents.filter(function (d){ return d.shareToken && !d.archivedAt; }).length;
   $("app").innerHTML =
     msgHtml() +
     '<section class="hero">' +
@@ -524,7 +571,7 @@ function renderHome(){
       '<h2 class="cardtitle">Customer signing page <span class="livepill">&#9679; LIVE</span></h2>' +
       '<p class="small" style="margin:2px 0 11px">&#10003; Live — every customer link points straight at your signing page.</p>' +
       '<div class="linkchip"><span class="lk">&#128279; Signing page</span><span class="lu">' + esc(portalShort) + "</span></div>" +
-      '<p class="small mut" style="margin:11px 0">Share this link with any customer — it opens their own signing page.</p>' +
+      '<p class="small mut" style="margin:11px 0">' + liveN + ' documents with a live link right now. Receipts you send for open balances carry the same tappable link.</p>' +
       '<button class="btn" style="width:100%" onclick="copyText(book.settings.portalUrl || \'\', this)">Copy link</button>' +
     "</section>" +
     '<div class="btnrow rise" style="animation-delay:.18s">' +
@@ -551,12 +598,24 @@ function docMatches(d, q){
          (c && String(c.name || "").toLowerCase().indexOf(q) > -1) ||
          (String(d.vehicle || "").toLowerCase().indexOf(q) > -1);
 }
+function docFilterMatch(d){
+  var f = ui.docFilter || "all";
+  if (f === "all") return true;
+  if (d.kind === "estimate") return d.status === f;
+  var t = docTotals(d), today = todayISO();
+  if (f === "paid") return d.status === "paid" || (t.total > 0 && t.balance <= 0);
+  if (f === "partial") return t.paid > 0 && t.balance > 0;
+  if (f === "overdue") return t.balance > 0 && d.dueDate && String(d.dueDate).slice(0, 10) < today;
+  if (f === "unpaid") return t.balance > 0 && t.paid === 0;
+  return true;
+}
 function docRow(d){
   var c = clientById(d.clientId);
   var t = docTotals(d);
-  var right = d.kind === "invoice" && d.status !== "paid" && t.balance > 0
-    ? '<div class="amt">' + fmt$(t.balance) + '<div class="small mut">balance</div></div>'
-    : '<div class="amt">' + fmt$(t.total) + "</div>";
+  var sub = d.kind === "invoice" && t.balance > 0
+    ? fmt$(t.balance) + " due" + (d.dueDate ? " &middot; " + fmtDate(d.dueDate) : "")
+    : fmtDate(d.issueDate || d.createdAt);
+  var right = '<div class="amt">' + fmt$(t.total) + '<div class="small mut">' + sub + "</div></div>";
   return '<button class="rowitem" onclick="openDoc(' + d.id + ')">' +
     '<span class="grow"><span class="t1">' + esc(d.number || "(no number)") + "</span>" + statusChip(d) +
     '<span class="t2">' + esc(c ? c.name : "—") + (d.vehicle ? " &bull; " + esc(d.vehicle) : "") + "</span></span>" +
@@ -564,26 +623,26 @@ function docRow(d){
 }
 function renderDocuments(){
   var q = ui.docSearch;
-  var active = book.documents.filter(function (d){ return !d.archivedAt && d.kind === ui.docTab && docMatches(d, q); });
+  var tabTotal = book.documents.filter(function (d){ return !d.archivedAt && d.kind === ui.docTab; }).length;
+  var active = book.documents.filter(function (d){ return !d.archivedAt && d.kind === ui.docTab && docMatches(d, q) && docFilterMatch(d); });
   active.sort(function (a, b){ return String(b.createdAt || "").localeCompare(String(a.createdAt || "")); });
-  var filed = book.documents.filter(function (d){ return d.archivedAt && docMatches(d, q); });
-  filed.sort(function (a, b){ return String(b.archivedAt || "").localeCompare(String(a.archivedAt || "")); });
+  var chipDefs = ui.docTab === "estimate"
+    ? [["all", "All"], ["draft", "Draft"], ["sent", "Sent"], ["approved", "Approved"], ["declined", "Declined"]]
+    : [["all", "All"], ["unpaid", "Unpaid"], ["partial", "Partial"], ["overdue", "Overdue"], ["paid", "Paid"]];
   $("app").innerHTML =
     msgHtml() +
-    '<h3 class="sect" style="margin-top:2px">' + (ui.docTab === "estimate" ? "Estimates" : "Invoices") + '<span class="countbadge">' + active.length + "</span></h3>" +
+    '<h3 class="sect" style="margin-top:2px">' + (ui.docTab === "estimate" ? "Estimates" : "Invoices") + '<span class="countbadge">' + tabTotal + "</span></h3>" +
     '<div class="tabs no-print">' +
-      '<button class="tab' + (ui.docTab === "estimate" ? " on" : "") + '" onclick="ui.docTab=\'estimate\';render()">Estimates</button>' +
-      '<button class="tab' + (ui.docTab === "invoice" ? " on" : "") + '" onclick="ui.docTab=\'invoice\';render()">Invoices</button>' +
+      '<button class="tab' + (ui.docTab === "estimate" ? " on" : "") + '" onclick="ui.docTab=\'estimate\';ui.docFilter=\'all\';render()">Estimates</button>' +
+      '<button class="tab' + (ui.docTab === "invoice" ? " on" : "") + '" onclick="ui.docTab=\'invoice\';ui.docFilter=\'all\';render()">Invoices</button>' +
     "</div>" +
+    '<div class="tabs no-print">' + chipDefs.map(function (cd){
+      return '<button class="tab' + (ui.docFilter === cd[0] ? " on" : "") + '" onclick="ui.docFilter=\'' + cd[0] + '\';render()">' + cd[1] + "</button>";
+    }).join("") + "</div>" +
     '<input type="search" placeholder="Search number, client, vehicle…" value="' + esc(q) + '" oninput="ui.docSearch=this.value;renderDocumentsKeepFocus()">' +
     '<div class="btnrow"><button class="btn" onclick="newDocument(\'' + ui.docTab + '\')">+ New ' + (ui.docTab === "estimate" ? "Estimate" : "Invoice") + "</button></div>" +
     (active.length ? active.map(docRow).join("") : '<p class="mut center" style="margin:22px 0">No ' + (ui.docTab === "estimate" ? "estimates" : "invoices") + " found.</p>") +
-    (filed.length
-      ? '<div class="card"><h2>Filed history</h2><p class="small mut">Archived documents — read-only.</p>' + filed.map(function (d){
-          return '<div class="rowitem" style="cursor:default"><span class="grow"><span class="t1">' + esc(d.number || "") + "</span>" + statusChip(d) +
-            '<span class="t2">' + esc((clientById(d.clientId) || {}).name || "—") + " &bull; filed " + fmtDate(d.archivedAt) + '</span></span><span class="amt">' + fmt$(docTotals(d).total) + "</span></div>";
-        }).join("") + "</div>"
-      : "");
+""
 }
 function renderDocumentsKeepFocus(){
   var v = ui.view;
@@ -756,12 +815,12 @@ function renderDocEdit(){
           '<div><label>Phone</label><input id="qaPhone" placeholder="Phone"></div></div>' +
           '<div class="btnrow"><button class="btn ghost small" onclick="edQuickAddClient()">+ Add &amp; pick this client</button></div>') +
       '<div class="grid2">' +
-        '<div><label>Vehicle</label><input id="edVehicle" value="' + esc(d.vehicle || "") + '" placeholder="e.g. 2024 Lexus"></div>' +
+        '<div><label>Vehicle (year / make / model / VIN)</label><input id="edVehicle" value="' + esc(d.vehicle || "") + '" placeholder="e.g. 2021 Ford F-150 — VIN ...4821"></div>' +
         '<div><label>Status</label><input value="' + esc(d.status || "draft") + '" disabled></div>' +
       "</div>" +
       '<div class="grid2">' +
         '<div><label>Issue date</label><input type="date" id="edIssue" value="' + esc(d.issueDate || "") + '"></div>' +
-        '<div><label>Due date</label><input type="date" id="edDue" value="' + esc(d.dueDate || "") + '"></div>' +
+        '<div><label>' + (d.kind === "estimate" ? "Valid / due date" : "Due date") + '</label><input type="date" id="edDue" value="' + esc(d.dueDate || "") + '"></div>' +
       "</div>" +
     "</div>" +
     '<div class="card"><h2>Line items</h2>' + linesHtml +
@@ -877,6 +936,9 @@ function renderDocView(){
   }
   actions += '<button class="btn ghost" onclick="editDocument(' + d.id + ')">Edit</button>';
   actions += '<button class="btn ghost" onclick="window.print()">Print</button>';
+  actions += d.archivedAt
+    ? '<button class="btn ghost" onclick="unfileDoc(' + d.id + ')">Bring back</button>'
+    : '<button class="btn ghost" onclick="fileDoc(' + d.id + ')">File</button>';
   var payForm = "";
   if (!isEst && ui.payForm && t.balance > 0){
     payForm = '<div class="card no-print"><h2>Record payment</h2>' +
@@ -912,7 +974,7 @@ function renderDocView(){
       "<h2 style='margin-top:16px;font-size:21px'>" + (isEst ? "ESTIMATE " : "INVOICE ") + esc(d.number || "") + statusChip(d) + "</h2>" +
       '<div class="grid2">' +
         "<div><label>Customer</label><div><strong>" + esc(c ? c.name : "—") + "</strong>" +
-          (c && c.phone ? '<br><a href="tel:' + esc(c.phone.replace(/[^0-9+]/g, "")) + '">' + esc(c.phone) + "</a>" : "") +
+          (c && c.phone ? "<br>" + (gvCallUrl(c.phone) ? '<a href="' + gvCallUrl(c.phone) + '" target="_blank" rel="noopener" title="Call via Google Voice">' + esc(c.phone) + "</a>" : esc(c.phone)) : "") +
           (c && c.email ? "<br>" + esc(c.email) : "") +
           (c && c.address ? '<br><span class="small" style="white-space:pre-line">' + esc(c.address) + "</span>" : "") + "</div></div>" +
         "<div><label>Vehicle</label><div>" + esc(d.vehicle || "—") + "</div>" +
@@ -1102,21 +1164,35 @@ function renderClients(){
     msgHtml() +
     '<input type="search" placeholder="Search ' + book.clients.length + ' clients by name, phone, email…" value="' + esc(ui.clientSearch) + '" oninput="ui.clientSearch=this.value;ui.clientShown=100;renderClientsKeepFocus()">' +
     '<div class="btnrow"><button class="btn" onclick="editClient(null)">+ New client</button></div>' +
+    '<p class="small mut" style="margin:0 0 10px">Calls &amp; texts open in Google Voice — your shop line.</p>' +
+    '<div class="card"><h2>GOOGLE VOICE &rarr; CLIENTS</h2>' +
+      '<p class="small">Copy ALL your Google Voice numbers in at once — no typing them one by one. ' + book.clients.length + ' clients in the book now.</p>' +
+      '<label>Paste names &amp; numbers — one per line</label>' +
+      '<textarea id="gvPaste" rows="4" placeholder="Jane Doe 954-555-1234 — or just the number" oninput="ui.gvPaste=this.value">' + esc(ui.gvPaste || "") + "</textarea>" +
+      '<div class="btnrow"><button class="btn" onclick="importGvClients()">Add pasted clients</button></div>' +
+    "</div>" +
     shown.map(function (c){
-      var tel = String(c.phone || "").replace(/[^0-9+]/g, "");
-      var owed = 0;
+      var gvC = gvCallUrl(c.phone), gvT = gvTextUrl(c.phone);
+      var owed = 0, ne = 0, ni = 0;
       book.documents.forEach(function (dd){
-        if (!dd.archivedAt && dd.kind === "invoice" && dd.status !== "paid" && String(dd.clientId) === String(c.id)){
-          var bb = docTotals(dd).balance;
-          if (bb > 0) owed += bb;
+        if (dd.archivedAt || String(dd.clientId) !== String(c.id)) return;
+        if (dd.kind === "estimate") ne++;
+        else if (dd.kind === "invoice"){
+          ni++;
+          if (dd.status !== "paid"){ var bb = docTotals(dd).balance; if (bb > 0) owed += bb; }
         }
       });
+      var docLine = (ne || ni)
+        ? ((ne ? ne + (ne === 1 ? " estimate" : " estimates") : "") + (ne && ni ? " &bull; " : "") + (ni ? ni + (ni === 1 ? " invoice" : " invoices") : ""))
+        : "No estimates or invoices yet.";
       var standing = owed > 0
         ? '<span class="t3 owes">Owes ' + fmt$(owed) + "</span>"
         : '<span class="t3 paidup">Paid up</span>';
       return '<div class="rowitem"><span class="grow"><span class="t1" style="font-size:15.5px">' + esc(c.name) + "</span>" +
-        '<span class="t2">' + esc(c.phone || "") + (c.email ? " &bull; " + esc(c.email) : "") + "</span>" + standing + "</span>" +
-        (tel ? '<a class="btn ghost small" href="tel:' + tel + '">Call</a><a class="btn ghost small" href="sms:' + tel + '">Text</a>' : "") +
+        '<span class="t2">' + esc(c.phone || "") + (c.email ? " &bull; " + esc(c.email) : "") + "</span>" +
+        (c.notes ? '<span class="t2">' + esc(c.notes) + "</span>" : "") +
+        '<span class="t2">' + docLine + "</span>" + standing + "</span>" +
+        (gvC ? '<a class="btn ghost small" href="' + gvC + '" target="_blank" rel="noopener">Call</a><a class="btn ghost small" href="' + gvT + '" target="_blank" rel="noopener">Text</a>' : "") +
         '<button class="btn ghost small" onclick="editClient(' + c.id + ')">Edit</button></div>';
     }).join("") +
     (list.length > shown.length
@@ -1145,6 +1221,10 @@ function renderClientEdit(){
       "<label>Email</label><input id='clEmail' value='" + esc(v.email) + "'>" +
       "<label>Address</label><textarea id='clAddress' rows='2'>" + esc(v.address) + "</textarea>" +
       "<label>Notes</label><textarea id='clNotes' rows='2'>" + esc(v.notes) + "</textarea>" +
+      (c && gvDigits(v.phone) ? '<div class="btnrow"><a class="btn ghost small" href="' + gvCallUrl(v.phone) + '" target="_blank" rel="noopener">Call via Google Voice</a>' +
+        '<a class="btn ghost small" href="' + gvTextUrl(v.phone) + '" target="_blank" rel="noopener">Text via Google Voice</a>' +
+        '<button class="btn ghost small" onclick="copyClientNum(' + c.id + ',this)">Copy number</button></div>' +
+        '<p class="small mut">Calls &amp; texts open in Google Voice — your shop line.</p>' : "") +
       '<div class="btnrow"><button class="btn" onclick="saveClient()">Save client</button>' +
       '<button class="btn ghost" onclick="go(\'clients\')">Cancel</button>' +
       (c && !hasDocs ? '<button class="btn danger" onclick="deleteClient(' + c.id + ')">Delete client</button>' : "") +
@@ -1175,6 +1255,35 @@ function deleteClient(id){
   saveBook();
   flash("Client deleted.");
   go("clients");
+}
+
+/* Paste box: lines copied out of Google Voice (name + number, or number only).
+   Adds each as a client; exact phone duplicates already in the book are skipped. */
+function importGvClients(){
+  var lines = String(ui.gvPaste || "").split(/\r?\n/);
+  var seen = {};
+  book.clients.forEach(function (c){ var d = gvDigits(c.phone); if (d) seen[d] = true; });
+  var added = 0, skipped = 0, bad = 0;
+  lines.forEach(function (ln){
+    ln = ln.trim();
+    if (!ln) return;
+    var digits = ln.replace(/\D/g, "");
+    if (digits.length === 10) digits = "1" + digits;
+    if (digits.length !== 11 || digits.charAt(0) !== "1"){ bad++; return; }
+    if (seen[digits]){ skipped++; return; }
+    seen[digits] = true;
+    var name = ln.replace(/\+?1?[\s.\-()]*\(?\d{3}\)?[\s.\-]*\d{3}[\s.\-]*\d{4}\s*$/, "").replace(/[\s\u00b7,;:\-]+$/, "").trim();
+    var phone = digits.slice(1);
+    book.clients.push({ id: nextId(book.clients), name: name || phone, phone: phone, email: "", address: "", notes: "Imported from Google Voice" });
+    added++;
+  });
+  ui.gvPaste = "";
+  if (!added && !skipped && !bad){ flash("Paste some Google Voice names & numbers first.", false); return; }
+  saveBook();
+  flash("Google Voice import: added " + added + (added === 1 ? " client" : " clients") +
+    (skipped ? " · skipped " + skipped + " already in the book" : "") +
+    (bad ? " · " + bad + (bad === 1 ? " line" : " lines") + " had no full number" : "") + ".");
+  render();
 }
 
 /* ---------- Library ---------- */
@@ -1219,21 +1328,249 @@ function deleteItem(id){
   render();
 }
 
-/* ---------- Filed bookings (read-only) ---------- */
-function renderBookings(){
-  var list = (book.filedBookings || []).slice().sort(function (a, b){
-    return String(b.date || b.createdAt || "").localeCompare(String(a.date || a.createdAt || ""));
+/* ---------- Bookings (Book a visit / Owner's book / Booking settings) ---------- */
+function bookingServices(){
+  var sv = book.settings.bookingServices;
+  return (Array.isArray(sv) && sv.length) ? sv : ["Estimate", "Repair drop-off", "Service"];
+}
+function saveBookingSettings(){
+  var lines = $("bkServices").value.split(/\r?\n/).map(function (x){ return x.trim(); }).filter(Boolean);
+  book.settings.bookingServices = lines.length ? lines : bookingServices();
+  book.settings.bookingDepositCents = parseMoney($("bkDeposit").value);
+  book.settings.bookingNote = $("bkNote").value;
+  saveBook();
+  flash("Booking settings saved.");
+  render();
+}
+function addBooking(){
+  var name = $("nbName").value.trim();
+  if (!name){ alert("Enter the customer's name."); return; }
+  book.bookings.push({
+    id: nextId(book.bookings), customerName: name, phone: $("nbPhone").value.trim(),
+    service: $("nbService").value, date: $("nbDate").value, time: $("nbTime").value.trim(),
+    vehicle: $("nbVehicle").value.trim(), depositCents: parseMoney($("nbDeposit").value),
+    depositPaid: false, status: "booked", note: $("nbNote").value.trim(),
+    createdAt: new Date().toISOString(), archivedAt: null
   });
+  saveBook();
+  ui.bookingForm = false;
+  flash("Booking added to your book.");
+  render();
+}
+function fileBooking(id){
+  var i = -1;
+  for (var k = 0; k < book.bookings.length; k++) if (String(book.bookings[k].id) === String(id)) { i = k; break; }
+  if (i < 0) return;
+  var b = book.bookings.splice(i, 1)[0];
+  b.archivedAt = new Date().toISOString();
+  book.filedBookings.push(b);
+  saveBook();
+  flash("Booking filed.");
+  render();
+}
+function removeBooking(id){
+  if (!window.confirm("Remove this booking from your book?")) return;
+  book.bookings = book.bookings.filter(function (b){ return String(b.id) !== String(id); });
+  saveBook();
+  render();
+}
+function renderBookings(){
+  var s = book.settings;
+  var tab = ui.bookTab || "book";
+  var body = "";
+  if (tab === "visit"){
+    body = '<div class="card"><h2>Book a visit</h2>' +
+      '<p class="small">This is what customers book from: pick a service, pick a day, hold it with a deposit.</p>' +
+      "<label>Services</label><p>" + bookingServices().map(function (x){ return '<span class="chip" style="margin:0 6px 6px 0">' + esc(x) + "</span>"; }).join("") + "</p>" +
+      "<label>Deposit to book</label><p><strong>" + fmt$(Number(s.bookingDepositCents) || 0) + "</strong> — paid at paypal.me/" + esc(s.paypalMeHandle || "") + "</p>" +
+      (s.bookingNote ? "<label>Note for customers</label><p style=\"white-space:pre-line\">" + esc(s.bookingNote) + "</p>" : "") +
+      '<p class="small mut">New bookings from the booking page arrive by email until the database phase — then they land in your Owner\'s book on their own. Phone bookings: add them by hand in Owner\'s book.</p></div>';
+  } else if (tab === "settings"){
+    body = '<div class="card"><h2>Booking settings</h2>' +
+      "<label>Services (one per line)</label><textarea id='bkServices' rows='4'>" + esc(bookingServices().join("\n")) + "</textarea>" +
+      "<label>Deposit to book $</label><input id='bkDeposit' type='text' inputmode='decimal' value='" + ((Number(s.bookingDepositCents) || 0) / 100) + "'>" +
+      "<label>Note shown to customers</label><textarea id='bkNote' rows='3'>" + esc(s.bookingNote || "") + "</textarea>" +
+      '<div class="btnrow"><button class="btn" onclick="saveBookingSettings()">Save booking settings</button></div></div>';
+  } else {
+    var list = (book.bookings || []).slice().sort(function (a, b){
+      return String(a.date || a.createdAt || "").localeCompare(String(b.date || b.createdAt || ""));
+    });
+    var form = "";
+    if (ui.bookingForm){
+      form = '<div class="card"><h2>Add a booking</h2>' +
+        "<label>Customer name</label><input id='nbName'>" +
+        "<label>Phone</label><input id='nbPhone'>" +
+        "<label>Service</label><select id='nbService'>" + bookingServices().map(function (x){ return "<option>" + esc(x) + "</option>"; }).join("") + "</select>" +
+        '<div class="grid2"><div><label>Date</label><input id="nbDate" type="date" value="' + todayISO() + '"></div>' +
+        '<div><label>Time</label><input id="nbTime" placeholder="11:00"></div></div>' +
+        "<label>Vehicle</label><input id='nbVehicle'>" +
+        "<label>Deposit $</label><input id='nbDeposit' type='text' inputmode='decimal' value='" + ((Number(s.bookingDepositCents) || 0) / 100) + "'>" +
+        "<label>Note</label><input id='nbNote'>" +
+        '<div class="btnrow"><button class="btn" onclick="addBooking()">Save booking</button>' +
+        '<button class="btn ghost" onclick="ui.bookingForm=false;render()">Cancel</button></div></div>';
+    }
+    body = '<div class="btnrow"><button class="btn" onclick="ui.bookingForm=!ui.bookingForm;render()">+ ADD A BOOKING</button></div>' + form +
+      (list.length ? list.map(function (b){
+        return '<div class="rowitem" style="cursor:default"><span class="grow"><span class="t1" style="font-size:15.5px">' + esc(b.customerName || "—") + "</span>" +
+          '<span class="t2">' + esc(b.service || "") + (b.date ? " &bull; " + fmtDate(b.date) : "") + (b.time ? " &bull; " + esc(b.time) : "") + (b.vehicle ? " &bull; " + esc(b.vehicle) : "") + "</span>" +
+          (b.phone ? '<span class="t2">' + esc(b.phone) + "</span>" : "") + "</span>" +
+          '<span class="amt">' + fmt$(b.depositCents) + '<div class="small mut">' + (b.depositPaid ? "deposit paid" : "deposit") + '</div></span>' +
+          '<button class="btn ghost small" onclick="fileBooking(' + b.id + ')">File</button>' +
+          '<button class="btn ghost small" onclick="removeBooking(' + b.id + ')">Remove</button></div>';
+      }).join("") : '<div class="card"><p class="mut" style="margin:0">No bookings yet. When a customer books on the booking page — or you add one by hand — it lands here.</p></div>');
+  }
   $("app").innerHTML =
     msgHtml() +
-    '<div class="card"><h2>Filed bookings</h2>' +
-    '<p class="small mut">Archived bookings from your imported history — read-only in this edition.</p>' +
-    (list.length ? list.map(function (b){
-      return '<div class="rowitem" style="cursor:default"><span class="grow"><span class="t1" style="font-size:15.5px">' + esc(b.customerName || "—") + "</span>" + statusChip({ status: b.status || "" }) +
-        '<span class="t2">' + esc(fmtDate(b.date) || "") + (b.time ? " &bull; " + esc(b.time) : "") + " &bull; " + esc(b.service || "") + (b.vehicle ? " &bull; " + esc(b.vehicle) : "") + "</span></span>" +
-        '<span class="amt">' + fmt$(b.depositCents) + '<div class="small mut">' + (b.depositPaid ? "deposit paid" : "deposit") + "</div></span></div>";
-    }).join("") : '<p class="mut">No filed bookings in this book yet. Import your filed-history file in Settings to see them here.</p>') +
-    "</div>";
+    '<div class="tabs no-print">' +
+      '<button class="tab' + (tab === "visit" ? " on" : "") + '" onclick="ui.bookTab=\'visit\';render()">Book a visit</button>' +
+      '<button class="tab' + (tab === "book" ? " on" : "") + '" onclick="ui.bookTab=\'book\';render()">Owner\'s book</button>' +
+      '<button class="tab' + (tab === "settings" ? " on" : "") + '" onclick="ui.bookTab=\'settings\';render()">Booking settings</button>' +
+    "</div>" + body;
+}
+
+/* ---------- PayPal ---------- */
+function custLinkUrl(){
+  var raw = String(ui.custCode || "").trim();
+  if (!raw) return "";
+  var m = raw.match(/[?&]code=([^&\s]+)/);
+  if (m) raw = m[1];
+  else if (/^https?:\/\//i.test(raw)) return raw;
+  var base = String(book.settings.portalUrl || "").trim();
+  if (!base) return "";
+  return base + (base.indexOf("?") > -1 ? "&" : "?") + "code=" + raw;
+}
+function openCustLink(){
+  var u = custLinkUrl();
+  if (!u){ flash("Paste a signing link or its code first.", false); return; }
+  window.open(u, "_blank");
+}
+function copyCustLink(btn){
+  var u = custLinkUrl();
+  if (!u){ flash("Paste a signing link or its code first.", false); return; }
+  copyText(u, btn);
+}
+function renderPaypal(){
+  var s = book.settings;
+  var docs = book.documents.filter(function (d){ return !d.archivedAt; }).slice().sort(function (a, b){
+    return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+  });
+  var sel = ui.custDocId != null ? docById(ui.custDocId) : null;
+  $("app").innerHTML =
+    msgHtml() +
+    '<h3 class="sect" style="margin-top:2px">PayPal</h3>' +
+    '<div class="card"><h2>PayPal checkout <span class="livepill">PayPal.me — LIVE</span></h2>' +
+      '<p class="small">Live · Customers pay deposits and balances through your PayPal.me link — it works right now, no keys stored in this app.</p>' +
+      '<div class="linkbox">' + esc(paypalLink(0)) + "</div>" +
+      '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(0),this)">Copy PayPal.me link</button></div>' +
+      '<p class="small" style="margin-top:12px">Deposit link (' + fmt$(Number(s.bookingDepositCents) || 0) + " to book a visit):</p>" +
+      '<div class="linkbox">' + esc(paypalLink(Number(s.bookingDepositCents) || 0)) + "</div>" +
+      '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(book.settings.bookingDepositCents || 0),this)">Copy deposit link</button></div>' +
+      '<p class="small mut" style="margin-top:12px">How customers pay: their estimate or invoice link carries its own PayPal button for the balance; for a deposit, send the deposit link. This edition stores no PayPal secret — automatic deposit confirmations arrive with the database phase; until then, record payments on each invoice by hand.</p></div>' +
+    '<div class="card"><h2>Open a customer link <span class="livepill">READY</span></h2>' +
+      '<p class="small">Preview exactly what the customer sees.</p>' +
+      "<label>Pick a document</label><select onchange=\"ui.custDocId=this.value?Number(this.value):null;render()\">" +
+        '<option value="">— pick an estimate or invoice —</option>' +
+        docs.map(function (d){
+          var c = clientById(d.clientId);
+          return '<option value="' + d.id + '"' + (sel && String(sel.id) === String(d.id) ? " selected" : "") + ">" + esc(d.number || "") + " · " + esc(c ? c.name : "—") + "</option>";
+        }).join("") + "</select>" +
+      (sel ? '<div class="linkbox">' + esc(signingLink(sel)) + "</div>" +
+        '<div class="btnrow"><a class="btn small" href="' + esc(signingLink(sel)) + '" target="_blank" rel="noopener">Open link</a>' +
+        '<button class="btn ghost small" onclick="copyText(signingLink(docById(ui.custDocId)),this)">Copy link</button></div>' : "") +
+      '<label style="margin-top:14px">…or paste a code from any estimate or invoice</label>' +
+      '<input value="' + esc(ui.custCode || "") + '" placeholder="Paste the signing link or just its code" oninput="ui.custCode=this.value">' +
+      '<div class="btnrow"><button class="btn small" onclick="openCustLink()">Open pasted link</button>' +
+      '<button class="btn ghost small" onclick="copyCustLink(this)">Copy pasted link</button></div></div>';
+}
+
+/* ---------- Filed (filing system) ---------- */
+function fileRuleDue(d){
+  if (d.kind === "invoice"){ var t = docTotals(d); return t.total > 0 && t.balance <= 0; }
+  if (d.kind === "estimate"){ return d.status === "approved" || d.status === "declined"; }
+  return false;
+}
+function fileDoc(id){
+  var d = docById(id); if (!d) return;
+  d.archivedAt = new Date().toISOString();
+  saveBook();
+  flash((d.number || "Document") + " filed.");
+  render();
+}
+function unfileDoc(id){
+  var d = docById(id); if (!d) return;
+  d.archivedAt = null;
+  saveBook();
+  flash((d.number || "Document") + " brought back.");
+  render();
+}
+function fileOldItems(){
+  var now = new Date().toISOString(), today = todayISO(), n = 0;
+  book.documents.forEach(function (d){
+    if (!d.archivedAt && fileRuleDue(d)){ d.archivedAt = now; n++; }
+  });
+  var keep = [];
+  (book.bookings || []).forEach(function (b){
+    if (b.date && String(b.date).slice(0, 10) < today){ b.archivedAt = b.archivedAt || now; book.filedBookings.push(b); n++; }
+    else keep.push(b);
+  });
+  book.bookings = keep;
+  saveBook();
+  flash(n ? n + (n === 1 ? " item" : " items") + " filed." : "Nothing new to file — unpaid invoices and pending estimates never file themselves.");
+  render();
+}
+function unfileBooking(idx){
+  var b = book.filedBookings[idx]; if (!b) return;
+  book.filedBookings.splice(idx, 1);
+  b.archivedAt = null;
+  book.bookings.push(b);
+  saveBook();
+  flash("Booking brought back to your book.");
+  render();
+}
+function clearFiled(){
+  var docsN = book.documents.filter(function (d){ return d.archivedAt; }).length;
+  var n = docsN + book.filedBookings.length;
+  if (!n) return;
+  if (!window.confirm("Clear filed history (" + n + ")? This permanently deletes ONLY what is filed here. Active bookings, estimates, invoices and clients are never touched.")) return;
+  if (!window.confirm("Really clear all " + n + " filed items? This cannot be undone.")) return;
+  book.filedBookings = [];
+  book.documents = book.documents.filter(function (d){ return !d.archivedAt; });
+  saveBook();
+  flash("Filed history cleared.");
+  render();
+}
+function renderFiled(){
+  var filedDocs = book.documents.filter(function (d){ return d.archivedAt; }).slice().sort(function (a, b){
+    return String(b.archivedAt || "").localeCompare(String(a.archivedAt || ""));
+  });
+  var fb = book.filedBookings || [];
+  var total = fb.length + filedDocs.length;
+  $("app").innerHTML =
+    msgHtml() +
+    '<div class="card"><h2>\u{1F5C2} Filing — old items file themselves away</h2>' +
+      '<p class="small">Past bookings, paid invoices &amp; finished estimates</p>' +
+      '<p><span class="chip">' + total + " FILED</span></p></div>" +
+    '<div class="card"><h2>FILED HISTORY</h2>' +
+      '<p class="small">Old bookings, paid invoices, and finished estimates land here automatically every day — out of your main lists, not deleted.</p>' +
+      '<p class="small"><strong>How filing works:</strong> a booking files once its day has passed. An invoice files once it is paid in full. An estimate files once it is approved or declined. Unpaid invoices and pending estimates never file themselves — they still need you. You can also file any single booking or document by hand from its card.</p>' +
+      '<div class="btnrow"><button class="btn" onclick="fileOldItems()">File old items now</button>' +
+      '<button class="btn ghost" onclick="clearFiled()">Clear filed history (' + total + ")</button></div>" +
+      '<p class="small mut">"Clear filed history" permanently deletes ONLY what is filed here — bookings, documents with their lines, payments and signatures. Active bookings, estimates, invoices and clients are never touched.</p></div>' +
+    '<h3 class="sect">Filed bookings (' + fb.length + ")</h3>" +
+    (fb.length ? fb.map(function (b, idx){
+      return '<div class="rowitem" style="cursor:default"><span class="grow"><span class="t1" style="font-size:15.5px">' + esc(b.customerName || "—") + "</span>" +
+        '<span class="t2">' + esc(b.service || "") + (b.date ? " &bull; " + fmtDate(b.date) : "") + (b.time ? " &bull; " + esc(b.time) : "") + (b.vehicle ? " &bull; " + esc(b.vehicle) : "") + "</span>" +
+        '<span class="t2">Status: ' + esc(b.status || "") + (b.archivedAt ? " &bull; Filed " + fmtDate(b.archivedAt) : "") + "</span></span>" +
+        '<button class="btn ghost small" onclick="unfileBooking(' + idx + ')">Bring back</button></div>';
+    }).join("") : '<p class="mut center" style="margin:14px 0">No filed bookings yet.</p>') +
+    '<h3 class="sect">Filed estimates &amp; invoices (' + filedDocs.length + ")</h3>" +
+    (filedDocs.length ? filedDocs.map(function (d){
+      var c = clientById(d.clientId);
+      return '<div class="rowitem" onclick="openDoc(' + d.id + ')" style="cursor:pointer"><span class="grow"><span class="t1">' + esc(d.number || "") + "</span>" + statusChip(d) +
+        '<span class="t2">' + esc(c ? c.name : "—") + (d.archivedAt ? " &bull; Filed " + fmtDate(d.archivedAt) : "") + "</span></span>" +
+        '<span class="amt">' + fmt$(docTotals(d).total) + "</span>" +
+        '<button class="btn ghost small" onclick="event.stopPropagation();unfileDoc(' + d.id + ')">Bring back</button></div>';
+    }).join("") : '<div class="card"><p class="mut" style="margin:0">No filed documents yet. Paid invoices and finished estimates land here on their own every day.</p></div>');
 }
 
 /* ---------- Settings / Import / Export ---------- */
@@ -1249,10 +1586,11 @@ function renderSettings(){
       "<label>PayPal.me handle</label><input id='stPaypal' value='" + esc(s.paypalMeHandle) + "'>" +
       "<label>Signing page (portal) URL</label><input id='stPortal' value='" + esc(s.portalUrl) + "'>" +
       '<div class="btnrow"><button class="btn" onclick="saveSettings()">Save settings</button></div>' +
+      '<p class="small mut">Customer calls &amp; texts from this app open in Google Voice — your shop line, never your personal cell.</p>' +
     "</div>" +
     '<div class="card"><h2>Your book</h2>' +
       '<p class="small">Your book lives <strong>on this device only</strong> — nothing is stored online. Export it regularly and keep the file safe: that export is your walk-away copy, and importing it on any device brings your whole book back.</p>' +
-      '<p class="small mut">On this device right now: ' + book.clients.length + " clients &bull; " + book.documents.length + " documents &bull; " + book.items.length + " library items &bull; " + (book.filedBookings || []).length + " filed bookings.</p>" +
+      '<p class="small mut">On this device right now: ' + book.clients.length + " clients &bull; " + book.documents.length + " documents &bull; " + book.items.length + " library items &bull; " + (book.bookings || []).length + " bookings &bull; " + (book.filedBookings || []).length + " filed bookings.</p>" +
       "<label>Import book (book export file, or filed-history file)</label>" +
       '<input type="file" id="importFile" accept=".json,application/json">' +
       '<div class="btnrow"><button class="btn" onclick="importBook()">Import selected file</button>' +
@@ -1271,7 +1609,7 @@ function saveSettings(){
   render();
 }
 function exportBook(){
-  var payload = { data: { clients: book.clients, documents: book.documents, items: book.items, settings: book.settings, filedBookings: book.filedBookings } };
+  var payload = { data: { clients: book.clients, documents: book.documents, items: book.items, settings: book.settings, filedBookings: book.filedBookings, bookings: book.bookings || [] } };
   var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   var a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -1289,7 +1627,7 @@ function importBook(){
       if (root && root.data && typeof root.data === "object") root = root.data;   /* accept the {"data": {...}} wrapper */
       if (!root || typeof root !== "object") throw new Error("bad file");
       var hasBook = Array.isArray(root.clients) || Array.isArray(root.documents) || Array.isArray(root.items);
-      var hasFiled = Array.isArray(root.bookings);
+      var hasFiled = Array.isArray(root.bookings) && !Array.isArray(root.clients);
       if (!hasBook && !hasFiled) throw new Error("not a book file");
       if (hasBook && !window.confirm("Replace the book on this device with the imported book? (Clients, documents and library are replaced. Export first if you need the current book.)")) return;
       if (hasFiled && !window.confirm("Load the filed bookings from this file? (Filed bookings are replaced; your clients and documents stay.)")) return;
@@ -1300,6 +1638,7 @@ function importBook(){
         if (root.settings && typeof root.settings === "object")
           book.settings = Object.assign({}, DEFAULT_SETTINGS, root.settings);
         if (Array.isArray(root.filedBookings)) book.filedBookings = root.filedBookings;
+        if (Array.isArray(root.bookings)) book.bookings = root.bookings;
       }
       if (hasFiled){
         book.filedBookings = root.bookings;
