@@ -687,6 +687,17 @@ function b64urlEncode(text){
 /* Signing-link payload mirrors the current system exactly (field order
    matches the links the shop already sends), so the public signing page
    at the portal URL keeps opening them. */
+function ensureShareToken(doc){
+  if (doc.shareToken) return doc.shareToken;
+  var chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  function grp(){ var s = ""; for (var i = 0; i < 4; i++) s += chars.charAt(Math.floor(Math.random() * chars.length)); return s; }
+  var taken = {};
+  book.documents.forEach(function (d){ if (d.shareToken) taken[d.shareToken] = 1; });
+  var t;
+  do { t = grp() + "-" + grp() + "-" + grp() + "-" + grp(); } while (taken[t]);
+  doc.shareToken = t;
+  return t;
+}
 function signingPayload(doc){
   var c = clientById(doc.clientId);
   return {
@@ -706,13 +717,16 @@ function signingPayload(doc){
     }),
     estimateChoice: doc.estimateChoice || "",
     estimateChoiceLimitCents: doc.estimateChoiceLimitCents != null ? doc.estimateChoiceLimitCents : null,
-    paypalMeHandle: book.settings.paypalMeHandle || ""
+    paypalMeHandle: book.settings.paypalMeHandle || "",
+    shareToken: doc.shareToken || ""
   };
 }
 function signingLink(doc){
   var base = String(book.settings.portalUrl || "").trim();
   if (!base) return "";
+  if (doc.shareRevoked) return "";
   var sep = base.indexOf("?") > -1 ? "&" : "?";
+  if (!doc.shareToken){ ensureShareToken(doc); saveBook(); }
   return base + sep + "code=" + b64urlEncode(JSON.stringify(signingPayload(doc)));
 }
 function copyText(txt, btn){
@@ -1223,6 +1237,185 @@ function termsHtml(doc){
 }
 
 /* ---------- Document view ---------- */
+var AGREEMENT_SECTIONS = [
+  { n: 1, title: "REPAIR AUTHORIZATION & SHOP TERMS",
+    summary: "Repair authorization, pickup, and shop-fee terms for the work on this invoice.",
+    body: ["Estimate good for 30 days. Not responsible for damage caused by theft or acts of nature. I hereby authorize the above repairs, including sublet work, along with the necessary materials. You and your employees may operate my vehicle for the purpose of testing, inspection and delivery at my risk. If I cancel repairs prior to their completion for any reason, a tear down and reassembly fee of $_____ will be applied."],
+    box: ["Vehicle must be picked up on day of completion", "Storage fee of $_____ per day applies"],
+    foot: "** This charge represents costs and profits to the motor vehicle repair facility for miscellaneous shop supplies or waste disposal. ** F.S.403.718 mandates a $1.50 fee for each new or remanufactured battery sold in the State of Florida." },
+  { n: 2, title: "AUCTION AGREEMENT",
+    summary: "Auction buying terms — deposit, bid, and fee rules for vehicles bought through auction.",
+    body: [
+      "We offer this service to everyone interested in purchasing one or a few vehicles from used and salvage auto auctions.",
+      "You would provide us with specific lot number or the Year/Make/Model, maximum bid price and any other specific details regarding the vehicle you want.",
+      "Our bidding specialist will place bids on your behalf at the live Internet auction up to your maximum bid plus auction fees.",
+      "The buyer is responsible for any transportation fees. JPK King Auto Sales will assist in securing a licensed carrier if needed.",
+      "The buyer is bound by the terms & conditions of the selected auction company and is aware all vehicles are sold as is. JPK King Auto Sales is not responsible for the buyer's choice of vehicle.",
+      "Associated fees:",
+      "Security Deposit: $1,000 or 20% of Max Bid (whichever is higher)",
+      "Cash, Cashiers Check or Direct Bank Deposit",
+      "Full Max Bid Amount Required For International Customers (Non US Residents)",
+      "Additional fees (if applicable):",
+      "Sales tax: 7% (applicable to retail sales in Florida)"
+    ] },
+  { n: 3, title: "“AS IS” DEALER WARRANTY DISCLAIMER",
+    summary: "This vehicle is sold as is — read before signing. Sign the separate acknowledgment below after you have read the disclaimer.",
+    body: [
+      "EXPLANATION OF DEALER'S WARRANTY DISCLAIMER WITH REGARD TO ABOVE DESCRIBED VEHICLE.",
+      "THIS USED MOTOR VEHICLE IS SOLD WITHOUT ANY WARRANTY, EITHER EXPRESSED OR IMPLIED. THE BUYER WILL BEAR THE ENTIRE EXPENSE OF REPAIRING OR CORRECTING ANY DEFECTS THAT MAY PRESENTLY EXIST OR THAT MAY OCCUR IN THE VEHICLE. THE DEALER (SELLER) SHALL NOT HAVE ANY RESPONSIBILITY FOR CONSEQUENTIAL DAMAGES, DAMAGES TO PROPERTY, DAMAGES FOR LOSS OF USE, LOSS OF TIME, LOSS OF PROFITS OR INCOME, OR ANY OTHER INCIDENTAL DAMAGES WITH RESPECT TO ANY DEFECT OR MALFUNCTION OR UNFITNESS OR OTHER DEFICIENCY OF THIS VEHICLE. THE DEALER MAKES NO WARRANTIES, REPRESENTATION OR ASSURANCES THAT THE MOTOR VEHICLE CONTAINS ONLY ORIGINAL MANUFACTURER INSTALLED OR MANUFACTURER REBUILT COMPONENTS, PARTS OR ACCESSORIES.",
+      "(BUYER) PURCHASER ACKNOWLEDGES THAT HE HAS READ, UNDERSTANDS AND ACCEPTS ALL OF THE PROVISIONS OF THIS WARRANTY DISCLAIMER COVERING THE VEHICLE ABOVE DESCRIBED."
+    ] }
+];
+
+function toggleAgree(n){ ui.agreeOpen = ui.agreeOpen || {}; ui.agreeOpen[n] = !ui.agreeOpen[n]; render(); }
+function asIsBlockHtml(d){
+  var sig = d.asIsSignature;
+  var inner = '<div style="border:1px solid var(--gold);border-radius:12px;padding:12px;margin:12px 0 4px">' +
+    '<p style="margin:0"><strong style="color:var(--gold)">AS IS</strong> <span class="small mut">Read Before Signing</span></p>';
+  if (sig && sig.dataUrl){
+    inner += '<img class="sigimg" src="' + sig.dataUrl + '" alt="AS IS acknowledgment signature">' +
+      '<p class="small mut">X Buyer — signed by ' + esc(sig.signerName || "") + (sig.signedAt ? " &bull; " + fmtDate(sig.signedAt) : "") + '</p>' +
+      '<div class="btnrow"><button class="btn ghost small" onclick="openSign(' + d.id + ",'asIsSignature')\">Re-sign</button></div>";
+  } else {
+    inner += '<p class="small" style="margin:8px 0">X&nbsp; Buyer (print or sign name above)</p>' +
+      '<div class="btnrow"><button class="btn" onclick="openSign(' + d.id + ",'asIsSignature')\">Sign AS IS acknowledgment</button></div>";
+  }
+  inner += '<p class="small mut" style="margin:8px 0 0">Separate from the general invoice signature below — the buyer must sign here after reading the AS IS disclaimer.</p></div>';
+  return inner;
+}
+function agreementsHtml(d){
+  var s = book.settings;
+  var out = '<div class="card"><div class="doc-head"><img src="' + LOGO_URL + '" alt="JPR KING lion logo" style="width:44px;height:44px"><div>' +
+    '<h2 style="margin:0">Agreements &amp; Disclaimers</h2>' +
+    '<p class="small mut" style="margin:2px 0">' + esc(s.businessName || "JPR KING") + ' · TERMS THAT APPLY TO THIS DOCUMENT</p></div></div>';
+  AGREEMENT_SECTIONS.forEach(function (sec){
+    var open = ui.agreeOpen && ui.agreeOpen[sec.n];
+    out += '<div style="border-top:1px solid var(--line);padding:12px 0 4px;margin-top:12px">' +
+      '<p style="margin:0"><strong>' + sec.n + '. ' + esc(sec.title) + '</strong></p>' +
+      '<p class="small mut" style="margin:4px 0">' + esc(sec.summary) + '</p>' +
+      '<div class="btnrow"><button class="btn ghost small" onclick="toggleAgree(' + sec.n + ')">' + (open ? "Hide" : "Read") + '</button></div>';
+    if (open){
+      out += sec.body.map(function (p){ return '<p class="small" style="white-space:pre-line">' + esc(p) + "</p>"; }).join("");
+      if (sec.box) out += '<div class="linkbox" style="text-align:left">' + sec.box.map(function (b){ return "<div>" + esc(b) + "</div>"; }).join("") + "</div>";
+      if (sec.foot) out += '<p class="small">' + esc(sec.foot) + "</p>";
+      if (sec.n === 3) out += asIsBlockHtml(d);
+    }
+    out += "</div>";
+  });
+  return out + "</div>";
+}
+function customerMessage(d, link){
+  var s = book.settings, c = clientById(d.clientId), t = docTotals(d);
+  var name = c ? c.name : "there";
+  if (d.kind === "estimate") return "Hi " + name + ", this is " + (s.businessName || "JPR KING") + ". Your estimate " + d.number + " is ready — total " + fmt$(t.total) + ". Review, sign & pay here: " + link;
+  return "Hi " + name + ", this is " + (s.businessName || "JPR KING") + ". Your invoice " + d.number + " is ready — balance due " + fmt$(Math.max(0, t.balance)) + " (total " + fmt$(t.total) + "). Review, sign & pay here: " + link;
+}
+function docLinkNew(id){
+  var d = docById(id); if (!d) return;
+  if (d.shareToken && !window.confirm("Make a NEW customer link? The old link stops working.")) return;
+  d.shareRevoked = false; d.shareToken = null; ensureShareToken(d); saveBook(); flash("New customer link is live."); render();
+}
+function docLinkRevoke(id){
+  var d = docById(id); if (!d) return;
+  if (!window.confirm("Revoke this customer link? Anyone holding it loses access until you make a new one.")) return;
+  d.shareToken = null; d.shareRevoked = true; saveBook(); flash("Customer link revoked."); render();
+}
+function claimConfirm(docId, claimId){
+  var d = docById(docId); if (!d) return;
+  var cl = (d.paymentClaims || []).find(function (x){ return x.id === claimId; });
+  if (!cl) return;
+  cl.status = "confirmed";
+  d.payments = d.payments || [];
+  var nextId = d.payments.reduce(function (a, p){ return Math.max(a, Number(p.id) || 0); }, 0) + 1;
+  d.payments.push({ id: nextId, amountCents: cl.amountCents || 0, method: "PayPal", note: "PayPal " + (cl.txnId || ""), paidAt: new Date().toISOString() });
+  saveBook(); flash("Payment confirmed and posted to the invoice."); render();
+}
+function claimDismiss(docId, claimId){
+  var d = docById(docId); if (!d) return;
+  var cl = (d.paymentClaims || []).find(function (x){ return x.id === claimId; });
+  if (cl) cl.status = "dismissed";
+  saveBook(); render();
+}
+function deleteDoc(id){
+  var d = docById(id); if (!d) return;
+  if (!window.confirm("Delete " + d.number + "? This cannot be undone.")) return;
+  book.documents = book.documents.filter(function (x){ return x.id !== id; });
+  saveBook(); flash(d.number + " deleted."); go("documents");
+}
+function addInstallment(id){
+  var d = docById(id); if (!d) return;
+  var amt = parseMoney($("instAmt").value);
+  if (!amt){ flash("Type the step amount first.", false); return; }
+  d.installments = d.installments || [];
+  var nextId = d.installments.reduce(function (a, p){ return Math.max(a, Number(p.id) || 0); }, 0) + 1;
+  d.installments.push({ id: nextId, label: $("instLabel").value.trim() || "Installment", amountCents: amt, dueDate: $("instDue").value || "" });
+  ui.instForm = false; saveBook(); render();
+}
+function removeInstallment(docId, instId){
+  var d = docById(docId); if (!d) return;
+  d.installments = (d.installments || []).filter(function (x){ return x.id !== instId; });
+  saveBook(); render();
+}
+function sendCopyEmail(docId){
+  var d = docById(docId); if (!d) return;
+  var c = clientById(d.clientId);
+  if (!c || !c.email){ flash("No email on file for this customer — Text or Google Voice reaches them.", false); return; }
+  var link = signingLink(d);
+  var subject = "Your " + (d.kind === "estimate" ? "estimate" : "invoice") + " " + d.number + " from " + (book.settings.businessName || "JPR KING");
+  window.location.href = "mailto:" + encodeURIComponent(c.email) + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(customerMessage(d, link));
+}
+function customerLinkCardHtml(d){
+  var s = book.settings, c = clientById(d.clientId), t = docTotals(d);
+  var phone = c ? (c.phone || "") : "";
+  var email = c ? (c.email || "") : "";
+  var live = !!d.shareToken && !d.shareRevoked;
+  var link = live ? signingLink(d) : "";
+  var msg = live ? customerMessage(d, link) : "";
+  var msgPreview = live ? msg.split(link).join("[Customer link — full link included when you copy or send]") : "";
+  var portalHost = String(s.portalUrl || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+  var out = '<div class="card no-print"><h2>Customer link + PayPal pay ' +
+    (live ? '<span class="livepill">LINK LIVE</span>' : '<span class="livepill" style="background:#3a2f10;color:#f2c14e">NO LIVE LINK</span>') + '</h2>' +
+    '<p class="small">Send one link: the customer does everything on their own phone, just like at the shop — reviews the ' + (d.kind === "estimate" ? "estimate" : "invoice") + ', signs the ' + (d.kind === "estimate" ? "estimate" : "invoice") + ', signs the AS IS acknowledgment, and pays the deposit or balance with PayPal. Signatures and payments post here automatically.</p>';
+  if (live){
+    out += '<label>CUSTOMER CODE (BACKUP — THE LINK BELOW CARRIES THE DOCUMENT ITSELF)</label>' +
+      '<div class="linkbox">' + esc(d.shareToken) + '</div>' +
+      '<div class="btnrow"><button class="btn small" onclick="copyText(docById(' + d.id + ').shareToken,this)">Copy</button></div>' +
+      '<p class="small" style="margin-top:12px">🔗 Customer link ready — ' + esc(portalHost) + '</p>' +
+      '<div class="btnrow"><button class="btn small" onclick="copyText(signingLink(docById(' + d.id + ')),this)">Copy link</button>' +
+      '<button class="btn ghost small" onclick="window.open(signingLink(docById(' + d.id + ')),\'_blank\')">Open</button></div>' +
+      '<p class="small mut">Shown small here — Copy link sends the full link, with the document already inside it.</p>' +
+      '<div class="linkbox" style="text-align:left;white-space:pre-line">' + esc(msgPreview) + '</div>' +
+      '<p class="small mut">Preview only — the link looks short here. "Copy message for customer" includes the full link.</p>' +
+      '<div class="btnrow">' +
+        '<button class="btn" onclick="window.open(signingLink(docById(' + d.id + ')),\'_blank\')">Preview customer view</button>' +
+        '<button class="btn ghost" onclick="copyText(customerMessage(docById(' + d.id + '), signingLink(docById(' + d.id + '))),this)">Copy message for customer</button>' +
+        (phone ? '<button class="btn ghost" onclick="window.open(gvTextUrl(\'' + esc(phone) + '\'),\'_blank\')">Text ' + esc(phone) + '</button>' : "") +
+        (email ? '<button class="btn ghost" onclick="sendCopyEmail(' + d.id + ')">Email</button>' : '<button class="btn ghost" disabled>Email — no email on file</button>') +
+        (phone ? '<button class="btn ghost" onclick="window.open(gvTextUrl(\'' + esc(phone) + '\'),\'_blank\')">Google Voice</button>' : "") +
+        (phone ? '<button class="btn ghost" onclick="copyText(\'' + esc(phone) + '\',this)">Copy number</button>' : "") +
+        '<button class="btn ghost" onclick="docLinkNew(' + d.id + ')">New link</button>' +
+        '<button class="btn ghost" style="color:#ff7b72" onclick="docLinkRevoke(' + d.id + ')">Revoke link</button>' +
+      '</div>' +
+      (phone ? '<p class="small">Google Voice: tap Google Voice — if it opens your message list, tap the pencil ✏️, paste/type ' + esc(phone) + ', then paste the message and send. After the first message, this button opens right into their conversation.</p>' +
+      '<p class="small">Google Voice didn\'t come up? Open the ' + esc(phone) + ' conversation directly:</p>' +
+      '<div class="btnrow"><button class="btn ghost" onclick="window.open(gvTextUrl(\'' + esc(phone) + '\'),\'_blank\')">Open Google Voice conversation</button></div>' : "");
+  } else {
+    out += '<p class="small">This document has no live customer link right now.</p>' +
+      '<div class="btnrow"><button class="btn" onclick="docLinkNew(' + d.id + ')">New link</button></div>';
+  }
+  out += '<p class="small mut" style="margin-top:12px">PayPal payments from the customer view appear under Payments as "PayPal" with the PayPal order ID — no manual entry needed.</p>';
+  var claims = (d.paymentClaims || []).filter(function (x){ return x.status === "pending"; });
+  if (claims.length){
+    out += '<h3 style="color:var(--gold);margin:16px 0 4px">PayPal.me payments to verify</h3>' +
+      claims.map(function (cl){
+        return '<div class="totrow"><span>' + fmt$(cl.amountCents) + ' <span class="small mut">txn ' + esc(cl.txnId || "") + (cl.email ? " &bull; " + esc(cl.email) : "") + (cl.note ? " &bull; " + esc(cl.note) : "") + '</span></span>' +
+          '<span><button class="btn small" onclick="claimConfirm(' + d.id + "," + cl.id + ')">Confirm</button> ' +
+          '<button class="btn ghost small" onclick="claimDismiss(' + d.id + "," + cl.id + ')">Dismiss</button></span></div>';
+      }).join("");
+  }
+  return out + "</div>";
+}
+
 function renderDocView(){
   var d = docById(ui.currentDocId);
   if (!d) { go("documents"); return; }
@@ -1236,45 +1429,54 @@ function renderDocView(){
       (l.description ? '<div class="small mut">' + esc(l.description) + "</div>" : "") +
       '</td><td class="r">' + esc(l.quantity) + '</td><td class="r">' + fmt$(l.unitPriceCents) + '</td><td class="r">' + fmt$(lt) + "</td></tr>";
   }).join("");
-  var instHtml = "";
-  if ((d.installments || []).length){
-    instHtml = "<h3 style='color:var(--gold);margin:16px 0 4px'>Payment schedule</h3>" +
-      d.installments.map(function (it){
-        var link = paypalLink(it.amountCents);
-        return '<div class="totrow"><span>' + esc(it.label || "Installment") + (it.dueDate ? ' <span class="small mut">due ' + fmtDate(it.dueDate) + "</span>" : "") + "</span><span>" + fmt$(it.amountCents) +
-          (link ? ' &nbsp;<a href="' + esc(link) + '" target="_blank" rel="noopener">PayPal</a>' : "") + "</span></div>";
-      }).join("");
-  }
-  var payHtml = "";
-  if ((d.payments || []).length){
-    payHtml = "<h3 style='color:var(--gold);margin:16px 0 4px'>Payments</h3>" +
-      d.payments.map(function (p){
-        return '<div class="totrow"><span>' + fmt$(p.amountCents) + ' <span class="small mut">' + esc(p.method || "") +
-          (p.paidAt ? " &bull; " + fmtDate(p.paidAt) : "") + (p.note ? " &bull; " + esc(p.note) : "") + '</span></span>' +
-          '<button class="btn danger small no-print" onclick="deletePayment(' + d.id + "," + p.id + ')">Remove</button></div>';
-      }).join("");
-  }
-  var actions = "";
+  var statusActions = "";
   if (isEst){
-    if (d.status === "draft") actions += '<button class="btn" onclick="markSent(' + d.id + ')">Mark sent</button>';
+    if (d.status === "draft") statusActions += '<button class="btn" onclick="markSent(' + d.id + ')">Mark sent</button>';
     if (d.status !== "approved" && d.status !== "declined" && !d.convertedInvoiceId)
-      actions += '<button class="btn" onclick="recordApproval(' + d.id + ')">Record approval</button>';
+      statusActions += '<button class="btn" onclick="recordApproval(' + d.id + ')">Record approval</button>';
     if (d.status === "approved" && !d.convertedInvoiceId)
-      actions += '<button class="btn" onclick="convertToInvoice(' + d.id + ')">Convert to invoice</button>';
+      statusActions += '<button class="btn" onclick="convertToInvoice(' + d.id + ')">Convert to invoice</button>';
     if (d.convertedInvoiceId)
-      actions += '<button class="btn ghost" onclick="openDoc(' + d.convertedInvoiceId + ')">Open invoice ' + esc((docById(d.convertedInvoiceId) || {}).number || "") + "</button>";
+      statusActions += '<button class="btn ghost" onclick="openDoc(' + d.convertedInvoiceId + ')">Open invoice ' + esc((docById(d.convertedInvoiceId) || {}).number || "") + '</button>';
     if (d.status !== "declined" && !d.convertedInvoiceId)
-      actions += '<button class="btn danger" onclick="declineEstimate(' + d.id + ')">Decline</button>';
+      statusActions += '<button class="btn danger" onclick="declineEstimate(' + d.id + ')">Decline</button>';
   } else {
-    if (d.status === "draft") actions += '<button class="btn" onclick="markSent(' + d.id + ')">Mark open</button>';
-    if (t.balance > 0) actions += '<button class="btn" onclick="ui.payForm=!ui.payForm;render()">Record payment</button>';
-    if (t.balance <= 0 && d.status !== "paid") actions += '<button class="btn" onclick="markPaid(' + d.id + ')">Mark paid</button>';
+    if (d.status === "draft") statusActions += '<button class="btn" onclick="markSent(' + d.id + ')">Mark open</button>';
+    if (t.balance <= 0 && d.status !== "paid") statusActions += '<button class="btn" onclick="markPaid(' + d.id + ')">Mark paid</button>';
   }
-  actions += '<button class="btn ghost" onclick="editDocument(' + d.id + ')">Edit</button>';
-  actions += '<button class="btn ghost" onclick="window.print()">Print</button>';
-  actions += d.archivedAt
-    ? '<button class="btn ghost" onclick="unfileDoc(' + d.id + ')">Bring back</button>'
-    : '<button class="btn ghost" onclick="fileDoc(' + d.id + ')">File</button>';
+  var schedHtml = '<div class="card no-print"><h2>Payment schedule</h2>' +
+    '<div class="btnrow"><button class="btn ghost small" onclick="ui.instForm=!ui.instForm;render()">+ Add step</button></div>';
+  if (ui.instForm){
+    schedHtml += '<div class="grid3">' +
+      '<div><label>Label</label><input id="instLabel" placeholder="Deposit"></div>' +
+      '<div><label>Amount $</label><input id="instAmt" type="text" inputmode="decimal"></div>' +
+      '<div><label>Due date</label><input id="instDue" type="date"></div></div>' +
+      '<div class="btnrow"><button class="btn" onclick="addInstallment(' + d.id + ')">Save step</button>' +
+      '<button class="btn ghost" onclick="ui.instForm=false;render()">Cancel</button></div>';
+  }
+  if ((d.installments || []).length){
+    schedHtml += d.installments.map(function (it){
+      var link = paypalLink(it.amountCents);
+      return '<div class="totrow"><span>' + esc(it.label || "Installment") + (it.dueDate ? ' <span class="small mut">due ' + fmtDate(it.dueDate) + "</span>" : "") + "</span><span>" + fmt$(it.amountCents) +
+        (link ? ' &nbsp;<a href="' + esc(link) + '" target="_blank" rel="noopener">PayPal</a>' : "") +
+        ' &nbsp;<button class="btn ghost small" onclick="removeInstallment(' + d.id + "," + it.id + ')">Remove</button></span></div>';
+    }).join("");
+  } else if (!ui.instForm) {
+    schedHtml += '<p class="small mut">No schedule yet — the full ' + fmt$(t.total) + ' is due on receipt. Add steps to split it into a deposit and payments.</p>';
+  }
+  schedHtml += "</div>";
+  var payCard = '<div class="card no-print"><h2>Payments</h2>';
+  if ((d.payments || []).length){
+    payCard += d.payments.map(function (p){
+      return '<div class="totrow"><span>' + fmt$(p.amountCents) + ' <span class="small mut">' + esc(p.method || "") +
+        (p.paidAt ? " &bull; " + fmtDate(p.paidAt) : "") + (p.note ? " &bull; " + esc(p.note) : "") + '</span></span>' +
+        '<button class="btn danger small" onclick="deletePayment(' + d.id + "," + p.id + ')">Remove</button></div>';
+    }).join("");
+  } else {
+    payCard += '<p class="small mut">No payments recorded yet. When the customer pays a deposit or an installment, log it here and the balance updates instantly.</p>';
+  }
+  if (!isEst && t.balance > 0) payCard += '<div class="btnrow"><button class="btn" onclick="ui.payForm=!ui.payForm;render()">Record payment</button></div>';
+  payCard += "</div>";
   var payForm = "";
   if (!isEst && ui.payForm && t.balance > 0){
     payForm = '<div class="card no-print"><h2>Record payment</h2>' +
@@ -1286,21 +1488,19 @@ function renderDocView(){
       '<div class="btnrow"><button class="btn" onclick="savePayment(' + d.id + ')">Save payment</button>' +
       '<button class="btn ghost" onclick="ui.payForm=false;render()">Cancel</button></div></div>';
   }
-  function sigBlock(which, title){
-    var sig = d[which];
-    if (sig && sig.dataUrl){
-      return "<h3 style='color:var(--gold);margin:16px 0 4px'>" + title + '</h3><img class="sigimg" src="' + sig.dataUrl + '" alt="Signature">' +
-        '<p class="small mut">Signed by ' + esc(sig.signerName || "") + (sig.signedAt ? " &bull; " + fmtDate(sig.signedAt) : "") + "</p>" +
-        '<button class="btn ghost small no-print" onclick="openSign(' + d.id + ",'" + which + '\')">Re-sign</button>';
-    }
-    return "<h3 style='color:var(--gold);margin:16px 0 4px'>" + title + '</h3><p class="small mut">Not signed yet.</p>' +
-      '<button class="btn ghost small no-print" onclick="openSign(' + d.id + ",'" + which + '\')">Sign</button>';
-  }
-  var link = signingLink(d);
-  var balLink = paypalLink(Math.max(0, t.balance));
+  var sig = d.signature;
+  var sigCard = '<div class="card no-print"><h2>Signature</h2>' +
+    '<p class="small">Have the customer sign right on the phone to lock in the ' + (isEst ? "estimate" : "invoice") + '.</p>' +
+    (sig && sig.dataUrl
+      ? '<img class="sigimg" src="' + sig.dataUrl + '" alt="Customer signature">' +
+        '<p class="small mut">Signed by ' + esc(sig.signerName || "") + (sig.signedAt ? " &bull; " + fmtDate(sig.signedAt) : "") + '</p>' +
+        '<div class="btnrow"><button class="btn ghost" onclick="openSign(' + d.id + ",'signature')\">Re-sign</button></div>"
+      : '<div class="btnrow"><button class="btn" onclick="openSign(' + d.id + ",'signature')\">Collect signature</button></div>") +
+    "</div>";
   $("app").innerHTML =
     msgHtml() +
-    '<div class="btnrow no-print"><button class="btn ghost small" onclick="go(\'documents\')">&larr; All documents</button></div>' +
+    '<div class="btnrow no-print"><button class="btn ghost small" onclick="go(\'documents\')">&larr; All documents</button>' +
+    '<button class="btn ghost small" onclick="window.print()">Print</button></div>' +
     '<div class="card doc-sheet">' +
       '<div class="doc-head"><img src="' + LOGO_URL + '" alt="JPR KING lion logo"><div>' +
         "<h2 style='font-size:22px;margin:0'>" + esc(s.businessName || "JPR KING") + "</h2>" +
@@ -1309,12 +1509,12 @@ function renderDocView(){
       "</div></div>" +
       "<h2 style='margin-top:16px;font-size:21px'>" + (isEst ? "ESTIMATE " : "INVOICE ") + esc(d.number || "") + statusChip(d) + "</h2>" +
       '<div class="grid2">' +
-        "<div><label>Customer</label><div><strong>" + esc(c ? c.name : "—") + "</strong>" +
+        "<div><label>" + (isEst ? "Estimate for" : "Invoice for") + "</label><div><strong>" + esc(c ? c.name : "—") + "</strong>" +
           (c && c.phone ? "<br>" + (gvCallUrl(c.phone) ? '<a href="' + gvCallUrl(c.phone) + '" target="_blank" rel="noopener" title="Call via Google Voice">' + esc(c.phone) + "</a>" : esc(c.phone)) : "") +
           (c && c.email ? "<br>" + esc(c.email) : "") +
           (c && c.address ? '<br><span class="small" style="white-space:pre-line">' + esc(c.address) + "</span>" : "") + "</div></div>" +
         "<div><label>Vehicle</label><div>" + esc(d.vehicle || "—") + "</div>" +
-          "<label>Issue date</label><div>" + (fmtDate(d.issueDate) || "—") + "</div>" +
+          "<label>Issued</label><div>" + (fmtDate(d.issueDate) || "—") + "</div>" +
           (d.dueDate ? "<label>Due date</label><div>" + fmtDate(d.dueDate) + "</div>" : "") + "</div>" +
       "</div>" +
       '<table class="lines"><tr><th>Service</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Total</th></tr>' + linesHtml + "</table>" +
@@ -1322,26 +1522,27 @@ function renderDocView(){
       (t.tax ? '<div class="totrow"><span>Tax</span><span>' + fmt$(t.tax) + "</span></div>" : "") +
       (t.discount ? '<div class="totrow"><span>Discount</span><span>&minus;' + fmt$(t.discount) + "</span></div>" : "") +
       '<div class="totrow grand"><span>Total</span><span>' + fmt$(t.total) + "</span></div>" +
-      instHtml + payHtml +
-      (t.paid ? '<div class="totrow"><span>Paid</span><span>' + fmt$(t.paid) + "</span></div>" : "") +
+      (t.paid ? '<div class="totrow"><span>Paid so far</span><span>' + fmt$(t.paid) + "</span></div>" : "") +
       '<div class="totrow grand"><span>Balance due</span><span>' + fmt$(Math.max(0, t.balance)) + "</span></div>" +
+      (Math.max(0, t.balance) > 0 ? '<p class="small" style="color:#ff7b72;margin:4px 0">' + fmt$(Math.max(0, t.balance)) + " still due</p>" : "") +
       (d.customerApprovedName ? '<p class="small" style="margin-top:12px">Approved by ' + esc(d.customerApprovedName) + (d.customerApprovedAt ? " &bull; " + fmtDate(d.customerApprovedAt) : "") + "</p>" : "") +
+      (isEst && choiceLabel(d) ? '<p class="small" style="margin-top:8px"><strong>Customer choice:</strong> ' + esc(choiceLabel(d)) + "</p>" : "") +
       (d.notes ? '<label>Notes</label><p style="white-space:pre-line;margin:4px 0">' + esc(d.notes) + "</p>" : "") +
-      termsHtml(d) +
-      sigBlock("signature", isEst ? "Approval signature" : "Customer signature") +
-      sigBlock("asIsSignature", "AS IS acknowledgment signature") +
     "</div>" +
+    agreementsHtml(d) +
+    customerLinkCardHtml(d) +
+    schedHtml +
+    payCard +
     payForm +
-    '<div class="btnrow no-print">' + actions + "</div>" +
-    '<div class="card no-print"><h2>Customer link</h2>' +
-      '<p class="small">Send this link to the customer — it opens this ' + (isEst ? "estimate" : "invoice") + ' on the shop&rsquo;s signing page, ready to review, sign, and pay.</p>' +
-      '<div class="linkbox">' + esc(link) + "</div>" +
-      '<div class="btnrow"><button class="btn small" onclick="copyText(signingLink(docById(' + d.id + ')),this)">Copy signing link</button></div>' +
-      (balLink && t.balance > 0
-        ? '<p class="small" style="margin-top:12px">PayPal.me link for the balance (' + fmt$(t.balance) + "):</p>" +
-          '<div class="linkbox">' + esc(balLink) + "</div>" +
-          '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(Math.max(0,docTotals(docById(' + d.id + ')).balance)),this)">Copy PayPal link</button></div>'
-        : "") +
+    sigCard +
+    (statusActions ? '<div class="btnrow no-print">' + statusActions + "</div>" : "") +
+    '<div class="btnrow no-print">' +
+      '<button class="btn" onclick="sendCopyEmail(' + d.id + ')">Send copy to customer</button>' +
+      '<button class="btn ghost" onclick="editDocument(' + d.id + ')">Edit ' + (isEst ? "estimate" : "invoice") + '</button>' +
+      (d.archivedAt
+        ? '<button class="btn ghost" onclick="unfileDoc(' + d.id + ')">Bring back</button>'
+        : '<button class="btn ghost" onclick="fileDoc(' + d.id + ')">📁 File away</button>') +
+      '<button class="btn danger" onclick="deleteDoc(' + d.id + ')">Delete ' + esc(d.number || "") + '</button>' +
     "</div>";
 }
 function markSent(id){
@@ -1670,10 +1871,21 @@ function bookingServices(){
   return (Array.isArray(sv) && sv.length) ? sv : ["Estimate", "Repair drop-off", "Service"];
 }
 function saveBookingSettings(){
-  var lines = $("bkServices").value.split(/\r?\n/).map(function (x){ return x.trim(); }).filter(Boolean);
-  book.settings.bookingServices = lines.length ? lines : bookingServices();
-  book.settings.bookingDepositCents = parseMoney($("bkDeposit").value);
-  book.settings.bookingNote = $("bkNote").value;
+  var s = book.settings;
+  s.businessName = $("bkShopName").value.trim() || s.businessName;
+  var addrEl = $("bkShopAddress");
+  if (addrEl.value.trim() && addrEl.value.trim() !== addrEl.getAttribute("data-orig")) s.businessAddress = addrEl.value.trim();
+  s.businessPhone = $("bkPhone").value;
+  s.businessEmail = $("bkEmail").value.trim();
+  var svc = Array.prototype.map.call(document.querySelectorAll(".bkSvc"), function (el){ return el.value.trim(); }).filter(Boolean);
+  s.bookingServices = svc.length ? svc : bookingServices();
+  s.bookingDepositCents = parseMoney($("bkDeposit").value);
+  s.bookingOpenTime = $("bkOpen").value || "08:00";
+  s.bookingCloseTime = $("bkClose").value || "20:00";
+  s.bookingSlotMinutes = Number($("bkSlot").value) || 60;
+  s.bookingMaxPerSlot = Number($("bkMax").value) || 2;
+  if (ui.bkDaysDraft && ui.bkDaysDraft.length) s.bookingOpenDays = ui.bkDaysDraft.slice().sort();
+  ui.bkDaysDraft = null;
   saveBook();
   flash("Booking settings saved.");
   render();
@@ -1722,11 +1934,43 @@ function renderBookings(){
       (s.bookingNote ? "<label>Note for customers</label><p style=\"white-space:pre-line\">" + esc(s.bookingNote) + "</p>" : "") +
       '<p class="small mut">New bookings from the booking page arrive by email until the database phase — then they land in your Owner\'s book on their own. Phone bookings: add them by hand in Owner\'s book.</p></div>';
   } else if (tab === "settings"){
-    body = '<div class="card"><h2>Booking settings</h2>' +
-      "<label>Services (one per line)</label><textarea id='bkServices' rows='4'>" + esc(bookingServices().join("\n")) + "</textarea>" +
-      "<label>Deposit to book $</label><input id='bkDeposit' type='text' inputmode='decimal' value='" + ((Number(s.bookingDepositCents) || 0) / 100) + "'>" +
-      "<label>Note shown to customers</label><textarea id='bkNote' rows='3'>" + esc(s.bookingNote || "") + "</textarea>" +
-      '<div class="btnrow"><button class="btn" onclick="saveBookingSettings()">Save booking settings</button></div></div>';
+    if (!ui.bkDaysDraft) ui.bkDaysDraft = (s.bookingOpenDays || [1, 2, 3, 4, 5, 6]).slice();
+    var dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    var addrOneLine = String(s.businessAddress || "").replace(/\s*\n\s*/g, ", ");
+    var urlTail = String(s.emailLanePostboxUrl || "").slice(-4);
+    var filedCount = (book.filedBookings || []).length + book.documents.filter(function (d){ return d.archivedAt; }).length;
+    body = '<div class="card"><h2>On the booking page</h2>' +
+      "<label>Shop name</label><input id='bkShopName' value='" + esc(s.businessName || "") + "'>" +
+      "<label>Address</label><input id='bkShopAddress' value='" + esc(addrOneLine) + "' data-orig='" + esc(addrOneLine) + "'>" +
+      '<div class="grid2"><div><label>Phone</label><input id="bkPhone" value="' + esc(s.businessPhone || "") + '"></div>' +
+      '<div><label>Email</label><input id="bkEmail" value="' + esc(s.businessEmail || "") + '"></div></div></div>' +
+    '<div class="card"><h2>Hours &amp; slots</h2>' +
+      "<label>Open days</label><p style='margin:4px 0 10px'>" + dayNames.map(function (dn, di){
+        var on = ui.bkDaysDraft.indexOf(di) > -1;
+        return '<button type="button" class="btn small' + (on ? "" : " ghost") + '" style="margin:0 6px 6px 0" onclick="bkDayToggle(' + di + ',this)">' + dn + "</button>";
+      }).join("") + "</p>" +
+      '<div class="grid2"><div><label>Opens</label><input id="bkOpen" type="time" value="' + esc(s.bookingOpenTime || "08:00") + '"></div>' +
+      '<div><label>Closes</label><input id="bkClose" type="time" value="' + esc(s.bookingCloseTime || "20:00") + '"></div></div>' +
+      '<div class="grid2"><div><label>Slot length</label><select id="bkSlot">' + [15, 30, 45, 60, 90, 120].map(function (m){ return '<option value="' + m + '"' + ((Number(s.bookingSlotMinutes) || 60) === m ? " selected" : "") + ">" + m + " minutes</option>"; }).join("") + "</select></div>" +
+      '<div><label>Bookings per slot</label><input id="bkMax" type="number" value="' + (Number(s.bookingMaxPerSlot) || 2) + '"></div></div></div>' +
+    '<div class="card"><h2>Deposit</h2>' +
+      "<label>Default deposit amount in dollars (blank or 0 = no deposit step)</label><input id='bkDeposit' type='text' inputmode='decimal' value='" + ((Number(s.bookingDepositCents) || 0) / 100) + "'>" +
+      '<p class="small">This is only the DEFAULT — it prefills the deposit field on each new booking, and you type the real amount for that job. The booking\'s own amount is what the customer pays and what PayPal verifies. When PayPal automatic confirmations are connected (PayPal tab → Secret key), the pack carries a PayPal checkout link for the booking\'s amount and the deposit marks itself paid; until then the pack uses your PayPal.me link (paypal.me/' + esc(s.paypalMeHandle || "") + ') and you mark deposits paid in the book — marking one fires the updated pack email on its own.</p></div>' +
+    '<div class="card"><h2>Services</h2><div id="bkSvcList">' +
+      bookingServices().map(function (x){ return bkSvcRow(x); }).join("") +
+      '</div><div class="btnrow"><button class="btn ghost" onclick="bkSvcAdd()">+ Add a service</button></div></div>' +
+    '<button class="btn" style="width:100%;margin:0 0 14px" onclick="saveBookingSettings()">SAVE SETTINGS</button>' +
+    '<div class="card"><h2>Email lane <span class="livepill" id="lanePill">CHECKING</span></h2>' +
+      '<p class="small mut">Shop Book Postbox · Automatic pack emails from the shop Gmail</p>' +
+      '<div class="btnrow"><button class="btn ghost small" onclick="ui.laneOpen=!ui.laneOpen;render()">' + (ui.laneOpen ? "Hide panel" : "Show panel") + '</button></div>' +
+      (ui.laneOpen ? lanePanelHtml(urlTail) : "") +
+    '</div>' +
+    '<div class="card"><h2>Clear history — old bookings file away daily <span class="livepill">' + filedCount + ' FILED</span></h2>' +
+      '<div class="btnrow"><button class="btn ghost small" onclick="ui.clearOpen=!ui.clearOpen;render()">' + (ui.clearOpen ? "Hide panel" : "Show panel") + '</button></div>' +
+      (ui.clearOpen ? '<p class="small">No more scrolling through old bookings: once a booking\'s day has passed, it files itself away into the Filed history every day. Filed bookings are not deleted — bring any back, or clear the filed history out for good from Filed.</p>' +
+      '<div class="btnrow"><button class="btn" onclick="fileOldItems()">File old bookings now</button>' +
+      '<button class="btn ghost" onclick="go(\'filed\')">View filed history →</button></div>' : "") +
+    '</div>';
   } else {
     var list = (book.bookings || []).slice().sort(function (a, b){
       return String(a.date || a.createdAt || "").localeCompare(String(b.date || b.createdAt || ""));
@@ -1762,6 +2006,170 @@ function renderBookings(){
       '<button class="tab' + (tab === "book" ? " on" : "") + '" onclick="ui.bookTab=\'book\';render()">Owner\'s book</button>' +
       '<button class="tab' + (tab === "settings" ? " on" : "") + '" onclick="ui.bookTab=\'settings\';render()">Booking settings</button>' +
     "</div>" + body;
+  if (tab === "settings") ppLoadStatus();
+}
+
+/* ---------- PayPal engine (own-house) ---------- */
+var PP_FN = SB_URL + "/functions/v1/paypal";
+function ppCall(action, payload){
+  var p = { action: action };
+  if (payload) for (var k in payload) p[k] = payload[k];
+  return fetch(PP_FN, {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Authorization": "Bearer " + SB_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify(p)
+  }).then(function (r){ return r.json(); });
+}
+function ppCallUser(action, payload){
+  var p = { action: action };
+  if (payload) for (var k in payload) p[k] = payload[k];
+  var tok = (sbSession && sbSession.access_token) || SB_KEY;
+  return fetch(PP_FN, {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Authorization": "Bearer " + tok, "Content-Type": "application/json" },
+    body: JSON.stringify(p)
+  }).then(function (r){ return r.json(); });
+}
+function ppEye(id){
+  var el = $(id); if (!el) return;
+  el.type = el.type === "password" ? "text" : "password";
+}
+function ppManualHtml(){
+  var s = book.settings;
+  return '<p class="small">Customers can also pay through your PayPal.me link — it works right now. Payments there are logged by hand, as always.</p>' +
+    '<div class="linkbox">' + esc(paypalLink(0)) + "</div>" +
+    '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(0),this)">Copy PayPal.me link</button></div>' +
+    '<p class="small" style="margin-top:12px">Deposit link (' + fmt$(Number(s.bookingDepositCents) || 0) + " to book a visit):</p>" +
+    '<div class="linkbox">' + esc(paypalLink(Number(s.bookingDepositCents) || 0)) + "</div>" +
+    '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(book.settings.bookingDepositCents || 0),this)">Copy deposit link</button></div>';
+}
+function ppLoadStatus(){
+  ppCall("status").then(function (st){
+    ui.ppStatus = st || {};
+    var line = document.getElementById("ppStatusLine");
+    if (line){
+      if (st && st.ready && !st.sandbox) line.innerHTML = 'Status: <strong style="color:#35d99a">Connected ✓ (Live) — deposits confirm themselves</strong>';
+      else if (st && st.ready && st.sandbox) line.innerHTML = 'Status: <strong style="color:#f2c14e">Connected (Sandbox) — test mode, no real money moves</strong>';
+      else if (st && st.clientIdSet && !st.secretSet) line.innerHTML = 'Status: <strong style="color:#f2c14e">Client ID saved — paste your Secret key below to connect</strong>';
+      else line.innerHTML = 'Status: <strong style="color:#f2c14e">Not connected yet</strong>';
+    }
+    var sec = document.getElementById("ppSecret");
+    if (sec && st) sec.placeholder = st.secretSet ? "Saved — leave blank to keep" : "Paste your PayPal Secret key";
+    var lk = document.getElementById("laneKeyState");
+    if (lk && st) lk.textContent = st.laneKeySet ? "Key saved on the server — never shown back." : "No key saved yet.";
+    var pill = document.getElementById("lanePill");
+    var laneConn = !!(st && st.laneKeySet && book.settings.emailLanePostboxUrl);
+    if (pill){ pill.textContent = laneConn ? "CONNECTED" : "NOT CONNECTED"; pill.style.background = laneConn ? "#14532d" : ""; pill.style.color = laneConn ? "#35d99a" : ""; }
+    var ls = document.getElementById("laneStatusLine");
+    if (ls) ls.innerHTML = laneConn ? 'Status: <strong style="color:#35d99a">Connected</strong>' : 'Status: <strong style="color:#f2c14e">Not connected</strong>';
+    var lkf = document.getElementById("laneKey");
+    if (lkf && st) lkf.placeholder = st.laneKeySet ? "Saved — leave blank to keep it" : "Paste the shared key";
+  }).catch(function (){});
+}
+function ppSaveSettings(){
+  var s = book.settings;
+  s.businessName = $("ppName").value;
+  s.businessAddress = $("ppAddress").value;
+  s.businessEmail = $("ppEmail").value;
+  s.portalUrl = $("ppPortal").value.trim();
+  s.paypalClientId = $("ppClientId").value.trim();
+  s.paypalMeHandle = $("ppHandle").value.trim();
+  s.paypalEmail = $("ppPaypalEmail").value.trim();
+  s.paypalSandbox = $("ppSandbox").checked;
+  saveBook();
+  flash("PayPal settings saved.");
+  render();
+}
+function ppSaveSecret(btn){
+  var v = $("ppSecret").value.trim();
+  if (!v){ flash("Paste the Secret key first — blank keeps the saved one.", false); return; }
+  btn.disabled = true;
+  ppCallUser("save-secret", { name: "paypal_secret", value: v }).then(function (r){
+    if (r && r.ok){ $("ppSecret").value = ""; flash("Secret key saved on the server. ✅"); ppLoadStatus(); }
+    else flash("Could not save the Secret — check your sign-in and try again.", false);
+  }).catch(function (){ flash("Could not save the Secret.", false); })
+  .then(function (){ btn.disabled = false; });
+}
+function ppTest(btn){
+  btn.disabled = true;
+  btn.textContent = "Testing…";
+  ppCall("test").then(function (r){
+    if (r && r.ok){ flash("PayPal connection is LIVE and answering. ✅"); }
+    else { flash("PayPal did not answer the test — check the Client ID and Secret.", false); }
+  }).catch(function (){ flash("PayPal test could not run.", false); })
+  .then(function (){ btn.disabled = false; btn.textContent = "Test the connection"; });
+}
+function ppDisconnect(){
+  if (!window.confirm("Disconnect PayPal? The Secret key is removed from the server and automatic confirmations stop until you paste it again.")) return;
+  ppCallUser("save-secret", { name: "paypal_secret", value: "" }).then(function (r){
+    if (r && r.ok){ flash("PayPal disconnected."); ppLoadStatus(); }
+    else flash("Could not disconnect.", false);
+  }).catch(function (){ flash("Could not disconnect.", false); });
+}
+function bkSvcRow(x){
+  return '<div class="svc-row" style="display:flex;gap:8px;align-items:center;margin-bottom:8px"><input class="bkSvc" style="flex:1" value="' + esc(x || "") + '"><button class="btn ghost small" onclick="bkSvcDel(this)" title="Remove service">✕</button></div>';
+}
+function bkSvcAdd(){
+  var list = document.getElementById("bkSvcList");
+  if (list) list.insertAdjacentHTML("beforeend", bkSvcRow(""));
+}
+function bkSvcDel(btn){
+  var row = btn.closest(".svc-row");
+  if (row) row.remove();
+}
+function bkDayToggle(di, el){
+  if (!ui.bkDaysDraft) ui.bkDaysDraft = (book.settings.bookingOpenDays || [1, 2, 3, 4, 5, 6]).slice();
+  var i = ui.bkDaysDraft.indexOf(di);
+  if (i > -1) ui.bkDaysDraft.splice(i, 1); else ui.bkDaysDraft.push(di);
+  var on = ui.bkDaysDraft.indexOf(di) > -1;
+  el.className = "btn small" + (on ? "" : " ghost");
+}
+function lanePanelHtml(urlTail){
+  var s = book.settings;
+  return '<p id="laneStatusLine">Status: checking…</p>' +
+    '<p class="small">Automatic pack emails go out from the shop\'s Gmail (' + esc(s.emailLaneShopEmail || s.businessEmail || "") + ') through a small sender script — the JPR KING Shop Book Postbox, the same one the old Shop Book app used. Each booking gets ONE email: creating a booking sends nothing; when an estimate is attached the customer receives a single combined email — booking details, deposit link, and the gold sign button together. A booking with no estimate gets its one email at the "Send booking email" button; customer self-bookings send that confirmation automatically. Marking a deposit paid still sends its own updated pack. Until the lane is connected, no real email sends automatically and nothing is logged as sent — the manual Text, WhatsApp, Call and Email buttons work exactly as before. The shared key is stored on the server only and is never shown back. For a no-risk test, enter TEST_SANDBOX as the Postbox URL — sends are then simulated and labeled sandbox.</p>' +
+    '<label>Postbox URL (Apps Script web app URL)</label>' +
+    '<div style="display:flex;gap:8px;align-items:flex-start"><input id="laneUrl" type="password" style="flex:1" value="' + esc(s.emailLanePostboxUrl || "") + '"><button class="btn ghost small" onclick="ppEye(\'laneUrl\')">👁</button></div>' +
+    '<p class="small mut">Hidden — saved as script.google.com ••••' + esc(urlTail) + '. Tap the eye to see it.</p>' +
+    '<label>Shared key (saved — leave blank to keep it)</label>' +
+    '<div style="display:flex;gap:8px;align-items:flex-start"><input id="laneKey" type="password" style="flex:1" placeholder="Paste the shared key only to replace it"><button class="btn ghost small" onclick="ppEye(\'laneKey\')">👁</button></div>' +
+    '<p class="small mut" id="laneKeyState">Key saved on the server — it is never shown back here. Paste a new one only to replace it; tap the eye to check what you pasted.</p>' +
+    '<div class="btnrow"><button class="btn" onclick="laneSave(this)">Save email lane</button>' +
+    '<button class="btn ghost" onclick="laneTest(this)">Send test email to ' + esc(s.emailLaneShopEmail || s.businessEmail || "") + '</button>' +
+    '<button class="btn ghost" style="color:#ff7b72" onclick="laneDisconnect()">Disconnect</button></div>' +
+    '<div class="btnrow"><button class="btn ghost small" onclick="ui.laneReconnect=!ui.laneReconnect;render()">' + (ui.laneReconnect ? "▾" : "▸") + ' Reconnect the sender — JPR KING Shop Book Postbox script</button></div>' +
+    (ui.laneReconnect ? '<p class="small">Open the JPR KING Shop Book Postbox script in Google Apps Script, deploy it as a web app (Execute as: Me · Access: Anyone), copy its /exec address, and paste it as the Postbox URL above. Then save the lane and send the test email — a confirmed test flips the lane to Connected.</p>' : '');
+}
+function laneTest(btn){
+  btn.disabled = true;
+  ppCallUser("lane-test", {}).then(function (r){
+    if (r && r.ok && r.sandbox) flash("Sandbox test passed — sends are simulated and labeled sandbox. ✅");
+    else if (r && r.ok) flash("Test email sent — a confirmed send flips the lane to Connected. ✅");
+    else if (r && r.error === "lane_not_connected") flash("The lane is not connected yet — save the Postbox URL and the shared key first.", false);
+    else flash("The Postbox did not confirm the test — the lane stays unconnected until a test lands.", false);
+  }).catch(function (){ flash("The test could not run.", false); })
+  .then(function (){ render(); });
+}
+function laneDisconnect(){
+  if (!window.confirm("Disconnect the email lane? The Postbox address is cleared here and the shared key is removed from the server. Pack emails stop until you reconnect.")) return;
+  book.settings.emailLanePostboxUrl = "";
+  saveBook();
+  ppCallUser("save-secret", { name: "email_lane_key", value: "" }).then(function (){
+    flash("Email lane disconnected.");
+    render();
+  }).catch(function (){ flash("Email lane disconnected here."); render(); });
+}
+function laneSave(btn){
+  book.settings.emailLanePostboxUrl = $("laneUrl").value.trim();
+  saveBook();
+  var v = $("laneKey").value.trim();
+  if (!v){ flash("Email lane saved."); render(); return; }
+  btn.disabled = true;
+  ppCallUser("save-secret", { name: "email_lane_key", value: v }).then(function (r){
+    if (r && r.ok){ flash("Email lane saved — key stored on the server. ✅"); }
+    else flash("Lane address saved, but the key could not be stored.", false);
+  }).catch(function (){ flash("Lane address saved, but the key could not be stored.", false); })
+  .then(function (){ btn.disabled = false; render(); });
 }
 
 /* ---------- PayPal ---------- */
@@ -1794,14 +2202,38 @@ function renderPaypal(){
   $("app").innerHTML =
     msgHtml() +
     '<h3 class="sect" style="margin-top:2px">PayPal</h3>' +
-    '<div class="card"><h2>PayPal checkout <span class="livepill">PayPal.me — LIVE</span></h2>' +
-      '<p class="small">Live · Customers pay deposits and balances through your PayPal.me link — it works right now, no keys stored in this app.</p>' +
-      '<div class="linkbox">' + esc(paypalLink(0)) + "</div>" +
-      '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(0),this)">Copy PayPal.me link</button></div>' +
-      '<p class="small" style="margin-top:12px">Deposit link (' + fmt$(Number(s.bookingDepositCents) || 0) + " to book a visit):</p>" +
-      '<div class="linkbox">' + esc(paypalLink(Number(s.bookingDepositCents) || 0)) + "</div>" +
-      '<div class="btnrow"><button class="btn small" onclick="copyText(paypalLink(book.settings.bookingDepositCents || 0),this)">Copy deposit link</button></div>' +
-      '<p class="small mut" style="margin-top:12px">How customers pay: their estimate or invoice link carries its own PayPal button for the balance; for a deposit, send the deposit link. This edition stores no PayPal secret — automatic deposit confirmations arrive with the database phase; until then, record payments on each invoice by hand.</p></div>' +
+    '<div class="card"><h2>PayPal settings</h2>' +
+      "<label>Business name</label><input id='ppName' value='" + esc(s.businessName || "") + "'>" +
+      "<label>Shop address</label><textarea id='ppAddress' rows='2'>" + esc(s.businessAddress || "") + "</textarea>" +
+      '<p class="small mut">This address appears at the top of every receipt and on the customer view.</p>' +
+      "<label>Business email — printed on estimates, invoices &amp; receipts</label><input id='ppEmail' value='" + esc(s.businessEmail || "") + "'>" +
+      '<p class="small mut">This email appears next to the business name in the header and on every receipt and customer view.</p>' +
+      "<label>Customer signing page address — the live page every customer link points to</label><input id='ppPortal' value='" + esc(s.portalUrl || "") + "'>" +
+      '<p class="small mut">Every customer link points straight at this live signing page — it opens their estimate or invoice in their phone browser, no app to install and nothing to type.</p>' +
+      '<p class="small">Customer links will look like:</p>' +
+      '<div class="linkbox">🔗 Customer link&nbsp; ' + esc(String(s.portalUrl || "").replace(/^https?:\/\//, "")) + '?code=…</div>' +
+      "<label>PayPal Client ID — enables the PayPal button (recommended)</label>" +
+      '<div style="display:flex;gap:8px;align-items:flex-start"><input id="ppClientId" style="flex:1" value="' + esc(s.paypalClientId || "") + '"><button class="btn ghost small" onclick="ppEye(\'ppClientId\')">👁</button></div>' +
+      '<div class="grid2"><div><label>PayPal.me handle (fallback link)</label><input id="ppHandle" value="' + esc(s.paypalMeHandle || "") + '"></div>' +
+      '<div><label>PayPal email (shown if no button)</label><input id="ppPaypalEmail" value="' + esc(s.paypalEmail || "") + '"></div></div>' +
+      '<label style="display:flex;gap:8px;align-items:center;margin-top:12px"><input type="checkbox" id="ppSandbox" style="width:auto"' + (s.paypalSandbox ? " checked" : "") + '> Sandbox / test mode</label>' +
+      '<div class="btnrow"><button class="btn" onclick="ppSaveSettings()">Save PayPal settings</button></div>' +
+      '<p class="small" style="margin-top:12px"><strong>Get a Client ID:</strong> PayPal Developer → Log in with your PayPal business account → My Apps &amp; Credentials → Create App → copy the Client ID here. Leave Sandbox on while you test with PayPal\'s test buyer, then uncheck for real payments.</p>' +
+      '<p class="small">No Client ID yet? Add your PayPal.me handle and customers get a “Pay with PayPal” button that opens paypal.me — after they pay, you log it here by hand, same as always.</p>' +
+      '<p class="small">Cash / Zelle / Cash App stay manual under each invoice\'s Payments — nothing changes there.</p>' +
+    '</div>' +
+    '<div class="card"><h2>Automatic deposit confirmations</h2>' +
+      '<p class="small">This closes the last by-hand step in the book. With the connection on, each customer link carries a real PayPal checkout for that document\'s own balance — and when the customer pays, PayPal confirms it here by itself: the payment lands on the invoice, no hand-marking.</p>' +
+      '<p id="ppStatusLine">Status: checking…</p>' +
+      '<label>PayPal Secret key — server-side only, never shown back</label>' +
+      '<div style="display:flex;gap:8px;align-items:flex-start"><input id="ppSecret" type="password" style="flex:1" placeholder="Paste your PayPal Secret key"><button class="btn ghost small" onclick="ppEye(\'ppSecret\')">👁</button></div>' +
+      '<p class="small mut">Secret saved on the server — it is never shown back here. Paste a new one only to replace it; tap the eye to check what you pasted.</p>' +
+      '<div class="btnrow"><button class="btn" onclick="ppSaveSecret(this)">Save Secret key</button>' +
+      '<button class="btn ghost" onclick="ppTest(this)">Test the connection</button>' +
+      '<button class="btn ghost" onclick="ppDisconnect()">Disconnect</button></div>' +
+      '<p class="small mut" style="margin-top:12px">The Sandbox toggle above applies here too — keep the mode matched to the Client ID and Secret you pasted (Sandbox keys for testing, Live keys for real money). Nothing is ever marked paid on a customer\'s say-so: the app asks PayPal directly and only confirms when PayPal shows the full amount captured.</p>' +
+    '</div>' +
+    '<div class="card"><h2>PayPal.me — manual lane</h2>' + ppManualHtml() + '</div>' +
     '<div class="card"><h2>Open a customer link <span class="livepill">READY</span></h2>' +
       '<p class="small">Preview exactly what the customer sees.</p>' +
       "<label>Pick a document</label><select onchange=\"ui.custDocId=this.value?Number(this.value):null;render()\">" +
@@ -1817,6 +2249,7 @@ function renderPaypal(){
       '<input value="' + esc(ui.custCode || "") + '" placeholder="Paste the signing link or just its code" oninput="ui.custCode=this.value">' +
       '<div class="btnrow"><button class="btn small" onclick="openCustLink()">Open pasted link</button>' +
       '<button class="btn ghost small" onclick="copyCustLink(this)">Copy pasted link</button></div></div>';
+  ppLoadStatus();
 }
 
 /* ---------- Filed (filing system) ---------- */
