@@ -718,7 +718,8 @@ function signingPayload(doc){
     estimateChoice: doc.estimateChoice || "",
     estimateChoiceLimitCents: doc.estimateChoiceLimitCents != null ? doc.estimateChoiceLimitCents : null,
     paypalMeHandle: book.settings.paypalMeHandle || "",
-    shareToken: doc.shareToken || ""
+    shareToken: doc.shareToken || "",
+    paypalClientId: book.settings.paypalClientId || ""
   };
 }
 function signingLink(doc){
