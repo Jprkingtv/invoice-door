@@ -738,7 +738,7 @@ function copyText(txt, btn){
     var ta = document.createElement("textarea");
     ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand("copy"); done(); } catch (e) { /* leave text visible for manual copy */ }
+    try { if (document.execCommand("copy")) done(); else flash("Copy didn't take — long-press the link to copy it.", false); } catch (e) { flash("Copy didn't take — long-press the link to copy it.", false); }
     document.body.removeChild(ta);
   }
 }
@@ -760,6 +760,15 @@ function gvCallUrl(phone){
 function gvTextUrl(phone){
   var d = gvDigits(phone);
   return d ? "https://voice.google.com/u/0/messages?itemId=t.%2B" + d : "";
+}
+function gvTextWithCopy(phone, docId){
+  var doc = docById(docId);
+  if (doc) {
+    copyText(customerMessage(doc, signingLink(doc)), null);
+    flash("Message + link copied — paste it in Google Voice ✓");
+  }
+  var url = gvTextUrl(phone);
+  setTimeout(function (){ window.open(url, "_blank"); }, 350);
 }
 function copyClientNum(id, btn){
   var c = clientById(id); if (!c) return;
@@ -1390,16 +1399,16 @@ function customerLinkCardHtml(d){
       '<div class="btnrow">' +
         '<button class="btn" onclick="window.open(signingLink(docById(' + d.id + ')),\'_blank\')">Preview customer view</button>' +
         '<button class="btn ghost" onclick="copyText(customerMessage(docById(' + d.id + '), signingLink(docById(' + d.id + '))),this)">Copy message for customer</button>' +
-        (phone ? '<button class="btn ghost" onclick="window.open(gvTextUrl(\'' + esc(phone) + '\'),\'_blank\')">Text ' + esc(phone) + '</button>' : "") +
+        (phone ? '<button class="btn ghost" onclick="gvTextWithCopy(\'' + esc(phone) + '\',' + d.id + ')">Text ' + esc(phone) + '</button>' : "") +
         (email ? '<button class="btn ghost" onclick="sendCopyEmail(' + d.id + ')">Email</button>' : '<button class="btn ghost" disabled>Email — no email on file</button>') +
-        (phone ? '<button class="btn ghost" onclick="window.open(gvTextUrl(\'' + esc(phone) + '\'),\'_blank\')">Google Voice</button>' : "") +
+        (phone ? '<button class="btn ghost" onclick="gvTextWithCopy(\'' + esc(phone) + '\',' + d.id + ')">Google Voice</button>' : "") +
         (phone ? '<button class="btn ghost" onclick="copyText(\'' + esc(phone) + '\',this)">Copy number</button>' : "") +
         '<button class="btn ghost" onclick="docLinkNew(' + d.id + ')">New link</button>' +
         '<button class="btn ghost" style="color:#ff7b72" onclick="docLinkRevoke(' + d.id + ')">Revoke link</button>' +
       '</div>' +
-      (phone ? '<p class="small">Google Voice: tap Google Voice — if it opens your message list, tap the pencil ✏️, paste/type ' + esc(phone) + ', then paste the message and send. After the first message, this button opens right into their conversation.</p>' +
+      (phone ? '<p class="small">Google Voice: tap Text or Google Voice and the message with the link copies itself — just paste it in Google Voice and send. After the first message, this button opens right into their conversation.</p>' +
       '<p class="small">Google Voice didn\'t come up? Open the ' + esc(phone) + ' conversation directly:</p>' +
-      '<div class="btnrow"><button class="btn ghost" onclick="window.open(gvTextUrl(\'' + esc(phone) + '\'),\'_blank\')">Open Google Voice conversation</button></div>' : "");
+      '<div class="btnrow"><button class="btn ghost" onclick="gvTextWithCopy(\'' + esc(phone) + '\',' + d.id + ')">Open Google Voice conversation</button></div>' : "");
   } else {
     out += '<p class="small">This document has no live customer link right now.</p>' +
       '<div class="btnrow"><button class="btn" onclick="docLinkNew(' + d.id + ')">New link</button></div>';
