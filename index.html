@@ -1537,6 +1537,7 @@ function renderDocView(){
     sigCard +
     (statusActions ? '<div class="btnrow no-print">' + statusActions + "</div>" : "") +
     '<div class="btnrow no-print">' +
+      ((clientById(d.clientId) || {}).email ? '<button class="btn" onclick="sendDocEmailLane(' + d.id + ',this)">Email ' + (isEst ? "estimate" : "invoice") + ' to customer</button>' : '<button class="btn ghost" disabled>Email — no email on file</button>') +
       '<button class="btn" onclick="sendCopyEmail(' + d.id + ')">Send copy to customer</button>' +
       '<button class="btn ghost" onclick="editDocument(' + d.id + ')">Edit ' + (isEst ? "estimate" : "invoice") + '</button>' +
       (d.archivedAt
@@ -1544,6 +1545,22 @@ function renderDocView(){
         : '<button class="btn ghost" onclick="fileDoc(' + d.id + ')">📁 File away</button>') +
       '<button class="btn danger" onclick="deleteDoc(' + d.id + ')">Delete ' + esc(d.number || "") + '</button>' +
     "</div>";
+}
+function sendDocEmailLane(id, btn){
+  var d = docById(id); if (!d) return;
+  var c = clientById(d.clientId);
+  if (!c || !c.email) { flash("No email on file for this customer.", false); return; }
+  var label = "Email " + (d.kind === "estimate" ? "estimate" : "invoice") + " to customer";
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+  function restore(){ if (btn) { btn.disabled = false; btn.textContent = label; } }
+  ppCallUser("send-document", { id: d.id }).then(function (r){
+    restore();
+    if (r && r.ok) flash(d.number + " emailed to " + (r.to || c.email) + " ✓", true);
+    else flash("Email not sent — " + ((r && (r.error || r.detail)) || "lane not connected") + ".", false);
+  }).catch(function (){
+    restore();
+    flash("Email not sent — connection problem.", false);
+  });
 }
 function markSent(id){
   var d = docById(id); if (!d) return;
