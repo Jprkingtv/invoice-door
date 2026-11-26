@@ -730,6 +730,14 @@ function signingLink(doc){
   if (!doc.shareToken){ ensureShareToken(doc); saveBook(); }
   return base + sep + "code=" + b64urlEncode(JSON.stringify(signingPayload(doc)));
 }
+function signingShortLink(doc){
+  var base = String(book.settings.portalUrl || "").trim();
+  if (!base) return "";
+  if (doc.shareRevoked) return "";
+  if (!doc.shareToken){ ensureShareToken(doc); saveBook(); }
+  var sep = base.indexOf("?") > -1 ? "&" : "?";
+  return base + sep + "t=" + encodeURIComponent(doc.shareToken);
+}
 function copyText(txt, btn){
   function done(){ if (btn) { var o = btn.textContent; btn.textContent = "Copied ✓"; setTimeout(function (){ btn.textContent = o; }, 1600); } }
   if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt).then(done, function (){ fallback(); }); }
@@ -764,7 +772,7 @@ function gvTextUrl(phone){
 function gvTextWithCopy(phone, docId){
   var doc = docById(docId);
   if (doc) {
-    copyText(customerMessage(doc, signingLink(doc)), null);
+    copyText(customerMessage(doc, signingShortLink(doc)), null);
     flash("Message + link copied — paste it in Google Voice ✓");
   }
   var url = gvTextUrl(phone);
@@ -1380,22 +1388,22 @@ function customerLinkCardHtml(d){
   var email = c ? (c.email || "") : "";
   var live = !!d.shareToken && !d.shareRevoked;
   var link = live ? signingLink(d) : "";
-  var msg = live ? customerMessage(d, link) : "";
-  var msgPreview = live ? msg.split(link).join("[Customer link — full link included when you copy or send]") : "";
+  var msg = live ? customerMessage(d, signingShortLink(d)) : "";
+  var msgPreview = live ? msg.split(link).join("[Customer link — short link included when you copy or send]") : "";
   var portalHost = String(s.portalUrl || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
   var out = '<div class="card no-print"><h2>Customer link + PayPal pay ' +
     (live ? '<span class="livepill">LINK LIVE</span>' : '<span class="livepill" style="background:#3a2f10;color:#f2c14e">NO LIVE LINK</span>') + '</h2>' +
     '<p class="small">Send one link: the customer does everything on their own phone, just like at the shop — reviews the ' + (d.kind === "estimate" ? "estimate" : "invoice") + ', signs the ' + (d.kind === "estimate" ? "estimate" : "invoice") + ', signs the AS IS acknowledgment, and pays the deposit or balance with PayPal. Signatures and payments post here automatically.</p>';
   if (live){
-    out += '<label>CUSTOMER CODE (BACKUP — THE LINK BELOW CARRIES THE DOCUMENT ITSELF)</label>' +
+    out += '<label>CUSTOMER CODE — THE SHORT LINK BELOW OPENS THIS DOCUMENT</label>' +
       '<div class="linkbox">' + esc(d.shareToken) + '</div>' +
       '<div class="btnrow"><button class="btn small" onclick="copyText(docById(' + d.id + ').shareToken,this)">Copy</button></div>' +
       '<p class="small" style="margin-top:12px">🔗 Customer link ready — ' + esc(portalHost) + '</p>' +
-      '<div class="btnrow"><button class="btn small" onclick="copyText(signingLink(docById(' + d.id + ')),this)">Copy link</button>' +
+      '<div class="btnrow"><button class="btn small" onclick="copyText(signingShortLink(docById(' + d.id + ')),this)">Copy link</button>' +
       '<button class="btn ghost small" onclick="window.open(signingLink(docById(' + d.id + ')),\'_blank\')">Open</button></div>' +
-      '<p class="small mut">Shown small here — Copy link sends the full link, with the document already inside it.</p>' +
+      '<p class="small mut">Shown small here — Copy link sends the short link. It opens this document on the customer\'s phone.</p>' +
       '<div class="linkbox" style="text-align:left;white-space:pre-line">' + esc(msgPreview) + '</div>' +
-      '<p class="small mut">Preview only — the link looks short here. "Copy message for customer" includes the full link.</p>' +
+      '<p class="small mut">Preview only — "Copy message for customer" includes the short link, ready to text.</p>' +
       '<div class="btnrow">' +
         '<button class="btn" onclick="window.open(signingLink(docById(' + d.id + ')),\'_blank\')">Preview customer view</button>' +
         '<button class="btn ghost" onclick="copyText(customerMessage(docById(' + d.id + '), signingLink(docById(' + d.id + '))),this)">Copy message for customer</button>' +
@@ -2274,7 +2282,7 @@ function renderPaypal(){
         }).join("") + "</select>" +
       (sel ? '<div class="linkbox">' + esc(signingLink(sel)) + "</div>" +
         '<div class="btnrow"><a class="btn small" href="' + esc(signingLink(sel)) + '" target="_blank" rel="noopener">Open link</a>' +
-        '<button class="btn ghost small" onclick="copyText(signingLink(docById(ui.custDocId)),this)">Copy link</button></div>' : "") +
+        '<button class="btn ghost small" onclick="copyText(signingShortLink(docById(ui.custDocId)),this)">Copy link</button></div>' : "") +
       '<label style="margin-top:14px">…or paste a code from any estimate or invoice</label>' +
       '<input value="' + esc(ui.custCode || "") + '" placeholder="Paste the signing link or just its code" oninput="ui.custCode=this.value">' +
       '<div class="btnrow"><button class="btn small" onclick="openCustLink()">Open pasted link</button>' +
