@@ -2134,6 +2134,8 @@ function lanePanelHtml(urlTail){
     '<label>Shared key (saved — leave blank to keep it)</label>' +
     '<div style="display:flex;gap:8px;align-items:flex-start"><input id="laneKey" type="password" style="flex:1" placeholder="Paste the shared key only to replace it"><button class="btn ghost small" onclick="ppEye(\'laneKey\')">👁</button></div>' +
     '<p class="small mut" id="laneKeyState">Key saved on the server — it is never shown back here. Paste a new one only to replace it; tap the eye to check what you pasted.</p>' +
+    '<label>Test recipient (optional)</label>' +
+    '<input id="laneTestTo" type="email" placeholder="Leave blank to test the shop email above">' +
     '<div class="btnrow"><button class="btn" onclick="laneSave(this)">Save email lane</button>' +
     '<button class="btn ghost" onclick="laneTest(this)">Send test email to ' + esc(s.emailLaneShopEmail || s.businessEmail || "") + '</button>' +
     '<button class="btn ghost" style="color:#ff7b72" onclick="laneDisconnect()">Disconnect</button></div>' +
@@ -2142,9 +2144,10 @@ function lanePanelHtml(urlTail){
 }
 function laneTest(btn){
   btn.disabled = true;
-  ppCallUser("lane-test", {}).then(function (r){
+  var toEl = $("laneTestTo"); var to = toEl ? toEl.value.trim() : "";
+  ppCallUser("lane-test", to ? { to: to } : {}).then(function (r){
     if (r && r.ok && r.sandbox) flash("Sandbox test passed — sends are simulated and labeled sandbox. ✅");
-    else if (r && r.ok) flash("Test email sent — a confirmed send flips the lane to Connected. ✅");
+    else if (r && r.ok) flash("Test email sent" + (to ? " to " + to : "") + " — a confirmed send flips the lane to Connected. ✅");
     else if (r && r.error === "lane_not_connected") flash("The lane is not connected yet — save the Postbox URL and the shared key first.", false);
     else flash("The Postbox did not confirm the test — the lane stays unconnected until a test lands.", false);
   }).catch(function (){ flash("The test could not run.", false); })
