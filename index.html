@@ -180,6 +180,10 @@ select.picker{margin-top:6px}
 .sbwall .btn{width:100%;margin-top:12px}
 .sbwall .wmsg{font-size:13.5px;color:var(--gold2);min-height:20px;margin:13px 0 0;line-height:1.55}
 .sbwall .wnote{font-size:12.5px;color:var(--mut);margin:17px 0 0;line-height:1.6}
+.sbwall .pinrow{display:none;margin-top:6px}
+.sbwall .pinrow.open{display:block}
+.sbwall .pinrow input{text-align:center;font-size:22px;letter-spacing:8px}
+.sbwall .pinerr{font-size:13.5px;color:#ff9d94;min-height:20px;margin:10px 0 0;line-height:1.55}
 .sbdot{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:1px}
 .sbdot.g{background:var(--green2);box-shadow:0 0 9px rgba(95,211,95,.85)}
 .sbdot.gold{background:var(--gold);box-shadow:0 0 9px rgba(212,175,55,.75)}
@@ -250,7 +254,13 @@ select.picker{margin-top:6px}
     <input id="sbEmail" type="email" autocomplete="email" placeholder="you@example.com">
     <button class="btn" onclick="sbSendLink()">Email me my sign-in link</button>
     <p class="wmsg" id="sbWallMsg"></p>
-    <button class="btn ghost" onclick="sbWorkOffline()">Keep working on this device only</button>
+    <button class="btn ghost" onclick="sbPinPrompt()">Keep working on this device only</button>
+    <div class="pinrow" id="sbPinRow">
+      <label for="sbPin">Your device door PIN</label>
+      <input id="sbPin" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="&bull;&bull;&bull;&bull;">
+      <button class="btn" onclick="sbPinEnter(this)">Unlock this device</button>
+      <p class="pinerr" id="sbPinErr"></p>
+    </div>
     <p class="wnote"><span class="sbdot gold"></span> On this device — will sync when you're back.<br>No password to remember — the link in your email is the key.</p>
   </div>
 </div>
@@ -438,6 +448,64 @@ function sbPaintWall(){
   if (!sbSession && !sbOfflineOnly) w.classList.add("open"); else w.classList.remove("open");
 }
 function sbShowWall(){ sbOfflineOnly = false; sbPaintWall(); }
+/* ---------- device door PIN (the wall in front of the device-only door) ----------
+   The PIN itself is never stored on this device — the app sends it to the
+   function, which compares a SHA-256 fingerprint kept server-side. Five
+   wrong tries lock this device's prompt for 5 minutes (localStorage). */
+var SB_PIN_KEY = "jpr-invoicing-pinlock";
+function sbPinLockState(){
+  try { var raw = localStorage.getItem(SB_PIN_KEY); if (raw) { var o = JSON.parse(raw); if (o && typeof o === "object") return o; } } catch (e) {}
+  return { fails: 0, lockedUntil: 0 };
+}
+function sbPinLockSave(o){ try { localStorage.setItem(SB_PIN_KEY, JSON.stringify(o)); } catch (e) {} }
+function sbPinPrompt(){
+  var row = null, err = null;
+  try { row = $("sbPinRow"); err = $("sbPinErr"); } catch (e) {}
+  if (!row) return;
+  row.classList.add("open");
+  var st = sbPinLockState();
+  if (err) err.textContent = (st.lockedUntil || 0) > Date.now() ? "Too many wrong tries — this door is locked for a few more minutes." : "";
+  try { var inp = $("sbPin"); if (inp) { inp.value = ""; inp.focus(); } } catch (e) {}
+}
+function sbPinEnter(btn){
+  var err = null, inp = null;
+  try { err = $("sbPinErr"); inp = $("sbPin"); } catch (e) {}
+  function say(t){ if (err) err.textContent = t; }
+  var st = sbPinLockState();
+  if ((st.lockedUntil || 0) > Date.now()){
+    say("Too many wrong tries — this door is locked. Try again in " + Math.max(1, Math.ceil((st.lockedUntil - Date.now()) / 60000)) + " minute(s).");
+    return;
+  }
+  var pin = inp ? String(inp.value || "").trim() : "";
+  if (!/^\d{4,8}$/.test(pin)){ say("Enter your PIN — 4 to 8 numbers."); return; }
+  if (btn) btn.disabled = true;
+  say("Checking\u2026");
+  ppCall("pin-check", { pin: pin }).then(function (r){
+    if (r && r.ok){
+      sbPinLockSave({ fails: 0, lockedUntil: 0 });
+      if (inp) inp.value = "";
+      sbWorkOffline();
+      return;
+    }
+    if (r && r.pinSet === false){
+      say("No PIN set yet — sign in with your email link and set your PIN in Settings.");
+      return;
+    }
+    st.fails = (st.fails || 0) + 1;
+    if (inp) inp.value = "";
+    if (st.fails >= 5){
+      st.lockedUntil = Date.now() + 5 * 60 * 1000;
+      st.fails = 0;
+      sbPinLockSave(st);
+      say("Too many wrong tries — this door is locked for 5 minutes.");
+    } else {
+      sbPinLockSave(st);
+      say("That PIN isn't right — try again.");
+    }
+  }).catch(function (){
+    say("Couldn't check the PIN — check your connection and try again.");
+  }).then(function (){ if (btn) btn.disabled = false; });
+}
 function sbWorkOffline(){
   sbOfflineOnly = true;
   sbPaintWall();
@@ -2092,6 +2160,8 @@ function ppLoadStatus(){
     if (sec && st) sec.placeholder = st.secretSet ? "Saved — leave blank to keep" : "Paste your PayPal Secret key";
     var lk = document.getElementById("laneKeyState");
     if (lk && st) lk.textContent = st.laneKeySet ? "Key saved on the server — never shown back." : "No key saved yet.";
+    var pinLine = document.getElementById("pinStatusLine");
+    if (pinLine && st) pinLine.innerHTML = st.pinSet ? 'Status: <strong style="color:#35d99a">PIN is set ✓ — the device-only door asks for it</strong>' : 'Status: <strong style="color:#f2c14e">No PIN set — the device-only door stays shut</strong>';
     var pill = document.getElementById("lanePill");
     var laneConn = !!(st && st.laneKeySet && book.settings.emailLanePostboxUrl);
     if (pill){ pill.textContent = laneConn ? "CONNECTED" : "NOT CONNECTED"; pill.style.background = laneConn ? "#14532d" : ""; pill.style.color = laneConn ? "#35d99a" : ""; }
@@ -2381,11 +2451,33 @@ function renderFiled(){
 }
 
 /* ---------- Settings / Import / Export ---------- */
+/* ---------- Device door PIN (Settings card) ---------- */
+function pinCardHtml(){
+  if (!sbSession) return "";
+  return '<div class="card"><h2>Device door PIN</h2>' +
+    '<p class="small" id="pinStatusLine">PIN status: checking…</p>' +
+    '<p class="small mut">This PIN guards the "Keep working on this device only" door on the sign-in wall — nobody walks straight through it anymore. The PIN itself is never stored on any device; only its fingerprint lives on the server, and it is never shown back.</p>' +
+    '<label>Device door PIN (4–8 numbers)</label>' +
+    '<div style="display:flex;gap:8px;align-items:flex-start"><input id="pinField" type="password" inputmode="numeric" autocomplete="off" maxlength="8" style="flex:1" placeholder="Choose a PIN only you know"><button class="btn ghost small" onclick="ppEye(\'pinField\')">👁</button></div>' +
+    '<div class="btnrow"><button class="btn" onclick="pinSave(this)">Set / change PIN</button></div>' +
+  "</div>";
+}
+function pinSave(btn){
+  var v = $("pinField").value.trim();
+  if (!/^\d{4,8}$/.test(v)){ flash("The PIN must be 4 to 8 numbers.", false); return; }
+  btn.disabled = true;
+  ppCallUser("pin-set", { pin: v }).then(function (r){
+    if (r && r.ok){ $("pinField").value = ""; flash("Device door PIN saved on the server. ✅"); ppLoadStatus(); }
+    else flash("Could not save the PIN — check your sign-in and try again.", false);
+  }).catch(function (){ flash("Could not save the PIN.", false); })
+  .then(function (){ btn.disabled = false; });
+}
 function renderSettings(){
   var s = book.settings;
   $("app").innerHTML =
     msgHtml() +
     sbAccountCard() +
+    pinCardHtml() +
     '<div class="card"><h2>Business settings</h2>' +
       "<label>Business name</label><input id='stName' value='" + esc(s.businessName) + "'>" +
       "<label>Business address</label><textarea id='stAddress' rows='2'>" + esc(s.businessAddress) + "</textarea>" +
@@ -2404,6 +2496,7 @@ function renderSettings(){
       '<div class="btnrow"><button class="btn" onclick="importBook()">Import selected file</button>' +
       '<button class="btn ghost" onclick="exportBook()">Export book</button></div>' +
     "</div>";
+  if (sbSession) ppLoadStatus();
 }
 function saveSettings(){
   book.settings.businessName = $("stName").value;
